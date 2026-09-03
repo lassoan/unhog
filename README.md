@@ -11,19 +11,30 @@ local space goes and free it up.
 
 ## Download
 
-**[Download Unhog.exe (latest release)](https://github.com/lassoan/unhog/releases/latest/download/Unhog.exe)**
+**[Download Unhog-win64.zip (latest release)](https://github.com/lassoan/unhog/releases/latest/download/Unhog-win64.zip)**
 
-Requires Windows 10 or 11. No installation needed: it is a single file that
-you can put anywhere and run. All releases, with release notes, are listed on
-the [releases page](https://github.com/lassoan/unhog/releases).
+Requires Windows 10 or 11. No installation needed. All releases, with release
+notes, are listed on the [releases page](https://github.com/lassoan/unhog/releases).
+Each release also offers `Unhog.exe`, the same program packed into a single
+file; it is handy for copying around, but Windows Defender is more likely to
+mistrust it, so the zip is the recommended download.
 
-When you run it the first time, Windows SmartScreen may show "Windows
-protected your PC" because the file is not code-signed. Click **More info**,
-then **Run anyway**.
+The files are not code-signed. When you run Unhog the first time, Windows
+SmartScreen may show "Windows protected your PC". Click **More info**, then
+**Run anyway**. If Defender removes the file as a suspected threat instead
+(a false positive that new unsigned programs sometimes trigger), open Windows
+Security, *Protection history*, find the entry and choose *Restore* or
+*Allow*.
 
 ## Run
 
-Double-click `Unhog.exe`. It scans your OneDrive folder and shows the treemap.
+Unzip `Unhog-win64.zip` anywhere, for example into your Documents or
+Downloads folder. This creates a folder named `Unhog`. Open it and double-click
+`Unhog.exe`. It scans your OneDrive folder and shows the treemap.
+
+Keep `Unhog.exe` together with the `_internal` folder next to it; the program
+does not run if the exe is copied out on its own. To put it on the desktop or
+Start menu, right-click `Unhog.exe` and create a shortcut.
 
 To scan a different folder, use the **Browse...** button, or start it from a
 command prompt with the folder as argument:

@@ -58,7 +58,7 @@ counts as local, so the app degrades to a plain disk-usage treemap.
 python -m unittest discover -s tests
 ```
 
-## Building a standalone Unhog.exe
+## Building the release files
 
 The exe needs no Python on the target machine. Use a regular python.org
 install (not the Microsoft Store one) to build it:
@@ -69,8 +69,20 @@ python -m venv .venv-build
 .venv-build\Scripts\python build_exe.py
 ```
 
-The result is `dist\Unhog.exe` (about 12 MB, no console window). It takes an
-optional folder argument like `python -m unhog` does.
+This produces two files in `dist\`:
+
+- `Unhog-win64.zip` (about 11 MB): PyInstaller's one-folder build, a folder
+  `Unhog` with a small `Unhog.exe` and its runtime in `_internal`. This is
+  the download the README points to. It runs in place, which keeps Windows
+  Defender's heuristics much quieter than the single-file build.
+- `Unhog.exe` (about 12 MB): the single-file build. It unpacks itself to a
+  temp folder on every start, which Defender's machine-learning detection
+  has flagged as a false positive in the past.
+
+Both are windowed (no console) and take an optional folder argument like
+`python -m unhog` does. The zip's name has no version in it so that the
+README's link to the latest release keeps working; the version is in the
+window title and on the release page.
 
 ## Version number
 
@@ -118,7 +130,8 @@ and run the tests, which check that the tree is internally consistent.
 
 Pushing a tag that starts with `v` runs the GitHub Actions workflow in
 `.github/workflows/release.yml`, which builds the exe on a Windows runner, runs
-the tests, and attaches `Unhog.exe` to a GitHub release for that tag:
+the tests, and attaches `Unhog-win64.zip` and `Unhog.exe` to a GitHub release
+for that tag:
 
 ```
 git tag v0.1.0
@@ -129,5 +142,5 @@ If a release for the tag already exists (e.g. one created by hand on GitHub),
 the exe is added to it. The tag name is the version, so nothing in the source
 needs to be changed before tagging.
 
-The download link in the README points at the latest release's `Unhog.exe`
+The download link in the README points at the latest release's `Unhog-win64.zip`
 asset, so it updates automatically whenever a new release is published.
