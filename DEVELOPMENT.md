@@ -71,7 +71,7 @@ python -m venv .venv-build
 
 This produces two files in `dist\`:
 
-- `Unhog-win64.zip` (about 11 MB): PyInstaller's one-folder build, a folder
+- `Unhog.zip` (about 11 MB): PyInstaller's one-folder build, a folder
   `Unhog` with a small `Unhog.exe` and its runtime in `_internal`. This is
   the download the README points to. It runs in place, which keeps Windows
   Defender's heuristics much quieter than the single-file build.
@@ -130,7 +130,7 @@ and run the tests, which check that the tree is internally consistent.
 
 Pushing a tag that starts with `v` runs the GitHub Actions workflow in
 `.github/workflows/release.yml`, which builds the exe on a Windows runner, runs
-the tests, and attaches `Unhog-win64.zip` and `Unhog.exe` to a GitHub release
+the tests, and attaches `Unhog.zip` and `Unhog.exe` to a GitHub release
 for that tag:
 
 ```
@@ -142,5 +142,5 @@ If a release for the tag already exists (e.g. one created by hand on GitHub),
 the exe is added to it. The tag name is the version, so nothing in the source
 needs to be changed before tagging.
 
-The download link in the README points at the latest release's `Unhog-win64.zip`
+The download link in the README points at the latest release's `Unhog.zip`
 asset, so it updates automatically whenever a new release is published.

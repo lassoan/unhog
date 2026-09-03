@@ -9,7 +9,7 @@ Store build):
 
 Two builds are produced in dist/:
 
-- dist/Unhog-win64.zip: a folder with a small Unhog.exe and its runtime in
+- dist/Unhog.zip: a folder with a small Unhog.exe and its runtime in
   _internal/ (PyInstaller one-folder mode). The recommended download: it runs
   in place, so Windows Defender's heuristics have much less to object to.
 - dist/Unhog.exe: everything in a single file (one-folder mode's contents
@@ -31,7 +31,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 DIST = os.path.join(HERE, "dist")
 VERSION_FILE = os.path.join(HERE, "unhog", "_version.py")
-ZIP_NAME = "Unhog-win64"  # fixed name so the README's latest-release link keeps working
+ZIP_NAME = "Unhog"  # fixed name so the README's latest-release link keeps working
 
 
 def version_from_git() -> str:
@@ -78,7 +78,7 @@ def main() -> int:
     print(f"Building Unhog {version}", flush=True)
     shutil.rmtree(DIST, ignore_errors=True)
 
-    # One-folder build -> dist/Unhog/ -> dist/Unhog-win64.zip (folder named Unhog inside).
+    # One-folder build -> dist/Unhog/ -> dist/Unhog.zip (folder named Unhog inside).
     pyinstaller("onedir")
     zip_path = shutil.make_archive(os.path.join(DIST, ZIP_NAME), "zip", DIST, "Unhog")
     shutil.rmtree(os.path.join(DIST, "Unhog"))

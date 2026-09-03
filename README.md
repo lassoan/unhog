@@ -11,7 +11,7 @@ local space goes and free it up.
 
 ## Download
 
-**[Download Unhog-win64.zip (latest release)](https://github.com/lassoan/unhog/releases/latest/download/Unhog-win64.zip)**
+**[Download Unhog.zip (latest release)](https://github.com/lassoan/unhog/releases/latest/download/Unhog.zip)**
 
 Requires Windows 10 or 11. No installation needed. All releases, with release
 notes, are listed on the [releases page](https://github.com/lassoan/unhog/releases).
@@ -28,7 +28,7 @@ Security, *Protection history*, find the entry and choose *Restore* or
 
 ## Run
 
-Unzip `Unhog-win64.zip` anywhere, for example into your Documents or
+Unzip `Unhog.zip` anywhere, for example into your Documents or
 Downloads folder. This creates a folder named `Unhog`. Open it and double-click
 `Unhog.exe`. It scans your OneDrive folder and shows the treemap.
 
