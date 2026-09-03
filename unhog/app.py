@@ -14,6 +14,7 @@ from typing import Callable, Optional
 
 import dearpygui.dearpygui as dpg
 
+from . import __version__
 from .scanner import Node, ProgressCallback, ScanCancelled, apply_filter, default_root, format_size, scan
 from .treemap import Item, hit_test, layout, local_size, open_aggregate, total_size
 from .win_dialogs import pick_folder
@@ -43,7 +44,7 @@ MIN_SIZE_CHOICES: dict[str, int] = {
 }
 DEFAULT_MIN_SIZE = "1 MB"
 MAX_HISTORY = 100       # views remembered for Back
-WINDOW_TITLE = "Unhog"
+WINDOW_TITLE = f"Unhog {__version__}"
 
 DAY = 86400.0
 # "Modified" filter: label -> (mode, age in seconds). Files are compared against
