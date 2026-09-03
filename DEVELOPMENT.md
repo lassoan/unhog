@@ -72,6 +72,22 @@ python -m venv .venv-build
 The result is `dist\Unhog.exe` (about 12 MB, no console window). It takes an
 optional folder argument like `python -m unhog` does.
 
+## Version number
+
+There is no version number in the source. The version shown in the window
+title comes from git:
+
+- `build_exe.py` runs `git describe --tags` (or uses the `UNHOG_VERSION`
+  environment variable if set) and writes the result to `unhog/_version.py`,
+  which is packaged into the exe and ignored by git.
+- Running from a source checkout, `unhog/__init__.py` asks git directly, so a
+  tagged commit reports `0.1.0` and later commits something like
+  `0.1.0-3-g1a2b3c4`, with `-dirty` appended for uncommitted changes.
+- Without git or a checkout the version is `dev`.
+
+The release workflow passes the tag name as `UNHOG_VERSION`, so a release
+built from tag `v0.2.0` shows "Unhog 0.2.0".
+
 ## Updating the screenshots
 
 The images in `docs/images` are rendered from the demo tree, so they never
@@ -110,8 +126,8 @@ git push origin v0.1.0
 ```
 
 If a release for the tag already exists (e.g. one created by hand on GitHub),
-the exe is added to it. Bump `__version__` in `unhog/__init__.py` to match the
-tag before tagging.
+the exe is added to it. The tag name is the version, so nothing in the source
+needs to be changed before tagging.
 
 The download link in the README points at the latest release's `Unhog.exe`
 asset, so it updates automatically whenever a new release is published.
