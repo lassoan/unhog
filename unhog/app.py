@@ -10,11 +10,11 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 import dearpygui.dearpygui as dpg
 
-from .scanner import Node, ScanCancelled, apply_filter, default_root, format_size, scan
+from .scanner import Node, ProgressCallback, ScanCancelled, apply_filter, default_root, format_size, scan
 from .treemap import Item, hit_test, layout, local_size, open_aggregate, total_size
 from .win_dialogs import pick_folder
 
@@ -128,10 +128,14 @@ def folder_color(node: Node, depth: int):
 
 # App -----------------------------------------------------------------------
 
+# Anything that builds a tree the way ``scanner.scan`` does (see also ``demo.demo_scan``).
+Scanner = Callable[[str, Optional[ProgressCallback], Optional[threading.Event]], Node]
+
 
 class UnhogApp:
-    def __init__(self, root_path: Optional[str] = None):
+    def __init__(self, root_path: Optional[str] = None, scanner: Scanner = scan):
         self.root_path = root_path or default_root()
+        self.scanner = scanner
         self.tree: Optional[Node] = None
         self.view: Optional[Node] = None
         self.items: list[Item] = []
@@ -169,8 +173,8 @@ class UnhogApp:
                 dpg.add_button(label="Browse...", callback=self._on_browse)
                 dpg.add_button(label="Rescan", callback=self._on_rescan)
                 dpg.add_spacer(width=12)
-                dpg.add_checkbox(label="Local files only", default_value=True,
-                                 callback=self._on_local_only)
+                self.local_only_check = dpg.add_checkbox(label="Local files only", default_value=True,
+                                                         callback=self._on_local_only)
                 dpg.add_spacer(width=12)
                 dpg.add_text("Min size:")
                 dpg.add_combo(items=list(MIN_SIZE_CHOICES), default_value=DEFAULT_MIN_SIZE,
@@ -178,8 +182,8 @@ class UnhogApp:
                 self.min_size_label = dpg.add_text("", color=TEXT_DIM)
                 dpg.add_spacer(width=12)
                 dpg.add_text("Modified:")
-                dpg.add_combo(items=list(MODIFIED_CHOICES), default_value=DEFAULT_MODIFIED,
-                              width=170, callback=self._on_modified)
+                self.modified_combo = dpg.add_combo(items=list(MODIFIED_CHOICES), default_value=DEFAULT_MODIFIED,
+                                                    width=170, callback=self._on_modified)
                 dpg.add_spacer(width=12)
                 dpg.add_button(label="Preferences...", callback=self._show_preferences)
             with dpg.group(horizontal=True):  # navigation + breadcrumb
@@ -327,7 +331,7 @@ class UnhogApp:
             def progress(seen, local, nbytes):
                 self.msgs.put(("progress", seen, local, nbytes))
             try:
-                tree = scan(path, progress, cancel)
+                tree = self.scanner(path, progress, cancel)
             except ScanCancelled:
                 self.msgs.put(("cancelled",))
             except Exception as exc:  # noqa: BLE001
@@ -750,6 +754,12 @@ def reveal_in_explorer(path: str) -> None:
 
 def main(argv: Optional[list[str]] = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    if "--demo" in argv:
+        # Made-up folder tree instead of a disk scan: for trying the UI and for screenshots.
+        from .demo import DEMO_ROOT, demo_scan
+        argv = [a for a in argv if a != "--demo"]
+        UnhogApp(argv[0] if argv else DEMO_ROOT, scanner=demo_scan).run()
+        return 0
     root = argv[0] if argv else None
     if root is not None and not os.path.isdir(root):
         print(f"Not a folder: {root}", file=sys.stderr)

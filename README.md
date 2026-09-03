@@ -7,80 +7,64 @@ that actually occupy local disk space. "Files On-Demand" keeps most files
 online-only; Unhog shows only the hydrated ones, so you can see where the
 local space goes and free it up.
 
-## Requirements
+![Unhog showing where the local space in a OneDrive folder goes](docs/images/home.png)
 
-- Windows, Python 3.9+
-- `pip install -r requirements.txt` (only dependency: [Dear PyGui](https://github.com/hoffstadt/DearPyGui))
+## Download
+
+**[Download Unhog.exe (latest release)](https://github.com/lassoan/unhog/releases/latest/download/Unhog.exe)**
+
+Requires Windows 10 or 11. No installation needed: it is a single file that
+you can put anywhere and run. All releases, with release notes, are listed on
+the [releases page](https://github.com/lassoan/unhog/releases).
+
+When you run it the first time, Windows SmartScreen may show "Windows
+protected your PC" because the file is not code-signed. Click **More info**,
+then **Run anyway**.
 
 ## Run
 
-```
-python -m unhog            # scans %OneDrive%
-python -m unhog D:\Other   # scans another folder
-```
+Double-click `Unhog.exe`. It scans your OneDrive folder and shows the treemap.
 
-or double-click `Unhog.pyw`.
-
-## Using it
-
-- **Hover** a rectangle for its full path, local size and file counts.
-- **Double-click a folder** to show only that folder's contents. Double-click the
-  background (or the current folder's title bar) to go back up. The breadcrumb
-  row and the **Up** / **Home** buttons navigate too. **Back** (button, or in
-  the right-click menu) returns to the previously shown view, step by step.
-- **Right-click a folder** for *Open in Explorer*, *Show only this folder* and
-  *Copy path*. Right-click a file for *Open containing folder in Explorer*.
-- **Browse...** / the folder box + **Rescan** scan a different folder.
-- **Modified** filters by last-modified time: "Older than …" (1 month to
-  5 years) or "Newer than …" (1 week to 1 year). Only matching files count
-  toward folder sizes and are drawn; folders act as containers for whatever
-  inside them matches. A folder's own time is the newest file anywhere inside
-  it (shown in the tooltip), so a folder whose newest file is older than the
-  cutoff shows in full under "Older than", while a folder with recent changes
-  shows just its old parts and is drawn gray to mark it as a container only.
-  The tooltip also shows each file's modification date and the unfiltered
-  sizes. Switching does not rescan.
-- **Local files only** (checked by default) sizes the treemap by bytes on local
-  disk and hides online-only placeholders. Uncheck it to see every file sized by
-  its full logical size; online-only files are drawn dimmed. Switching does not
-  rescan.
-- **Min size** (default 1 MB) hides files and folders smaller than the limit as
-  separate rectangles. Within each folder they are folded into one grey
-  "N smaller items" tile that carries their combined size, so the parent's area
-  stays accurate. Double-click that tile (or right-click it and choose *Show
-  contents*) to view the folded items on their own; the limit shrinks with the
-  view, so they appear individually. Right-click the tile to open its folder
-  in Explorer. "Off" shows everything. The limit applies to the scanned root: when you drill into
-  a folder it shrinks in proportion to that folder's share of the total, so you
-  see the same level of detail at every depth. The effective limit for the
-  current folder is shown next to the dropdown.
-
-**Preferences...** opens a dialog with the appearance settings:
-
-- **Scale fonts and padding by folder size** (on by default) grows folder
-  titles (and file labels) with the item's share of the folder currently
-  shown, from 10 px up to 34 px, so the biggest space hogs jump out. Title
-  strips grow to match, and folder frames scale the same way: the folder shown
-  gets the full padding, smaller folders get proportionally thinner frames.
-- **Padding** (1 px to 32 px, default 12 px) sets how wide the frame is that
-  each folder draws around its children.
-- **Padding scaling** (Off to Extreme) sets how much thinner the frames of
-  smaller folders get: the percentage is what the smallest folders keep of the
-  chosen padding, from 100% (uniform) down to 5%. Default is Firm (20%).
-  Only applies while scaling by size is on.
-
-Files are colored by type (video, image, audio, document, archive, code, disk
-image, other) and shaded darker the deeper they sit.
-
-## How "local storage" is detected
-
-A OneDrive placeholder that is online-only carries the Win32 attribute
-`FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS`. Files without it are hydrated and use
-local disk. The scanner reads attributes from the directory listing
-(`os.scandir`) and never opens files, so scanning does not trigger downloads.
-
-## Tests
+To scan a different folder, use the **Browse...** button, or start it from a
+command prompt with the folder as argument:
 
 ```
-python -m unittest discover -s tests
+Unhog.exe D:\Other
 ```
+
+## Freeing up space
+
+Unhog only shows where the space goes; it does not delete or change anything.
+To free the space a file or folder uses, right-click it in Unhog and choose
+*Open in Explorer* (for a file: *Open containing folder in Explorer*), then in
+Explorer right-click the item and choose **Free up space**. The file stays in
+the cloud and is downloaded again when you open it.
+
+## How to use
+
+Hover a rectangle for details, double-click a folder to zoom in, right-click for
+options. The toolbar filters by modification time, size and local storage.
+All controls and settings are explained in [USAGE.md](USAGE.md).
+
+## How it works
+
+Unhog asks Windows which files in the folder are online-only placeholders and
+which are actually present on disk. It reads only the directory listing and
+never opens files, so scanning does not download anything.
+
+It is tested with OneDrive, OneDrive for Business (SharePoint), and Dropbox
+but it should be compatible with other cloud storage providers as well.
+
+## Privacy
+
+Unhog runs entirely on your PC, does not connect to the internet, and does not
+send any information anywhere.
+
+## For developers
+
+Running from source, tests, building the exe and making releases are described
+in [DEVELOPMENT.md](DEVELOPMENT.md).
+
+## License
+
+[MIT](LICENSE)
