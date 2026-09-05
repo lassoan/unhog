@@ -1,9 +1,10 @@
-"""Native Windows folder picker (IFileOpenDialog with FOS_PICKFOLDERS) via ctypes.
+"""Native Windows dialogs via ctypes: folder picker and the Properties sheet.
 
 No third-party dependency: the COM interface is driven through raw vtable
 calls. ``pick_folder`` returns the chosen path, or ``None`` if the user
-cancelled. It raises ``OSError`` on non-Windows platforms or COM failures so
-callers can fall back to another dialog.
+cancelled. ``show_properties`` opens Explorer's Properties dialog for a file
+or folder. Both raise ``OSError`` on non-Windows platforms or on failure so
+callers can fall back to something else.
 """
 
 from __future__ import annotations
@@ -66,6 +67,38 @@ if sys.platform == "win32":
     def _find_owner(title: str) -> int:
         return user32.FindWindowW(None, title) or 0
 
+    SEE_MASK_INVOKEIDLIST = 0x0000000C
+    SW_SHOWNORMAL = 1
+
+    class SHELLEXECUTEINFOW(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("fMask", wintypes.ULONG), ("hwnd", wintypes.HWND),
+                    ("lpVerb", c_wchar_p), ("lpFile", c_wchar_p), ("lpParameters", c_wchar_p),
+                    ("lpDirectory", c_wchar_p), ("nShow", ctypes.c_int), ("hInstApp", wintypes.HINSTANCE),
+                    ("lpIDList", c_void_p), ("lpClass", c_wchar_p), ("hkeyClass", wintypes.HKEY),
+                    ("dwHotKey", wintypes.DWORD), ("hIconOrMonitor", wintypes.HANDLE),
+                    ("hProcess", wintypes.HANDLE)]
+
+    _shell32_le = ctypes.WinDLL("shell32", use_last_error=True)
+
+    def show_properties(path: str, owner_title: Optional[str] = None) -> None:
+        """Open the Explorer Properties dialog for ``path`` (the "properties" shell verb).
+
+        The sheet is shown by the shell on its own thread inside this process,
+        so it stays up as long as the app runs; the call returns at once.
+        """
+        hr = ole32.CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+        if hr < 0 and hr != RPC_E_CHANGED_MODE:
+            raise OSError(f"CoInitializeEx failed: 0x{hr & 0xFFFFFFFF:08X}")
+        info = SHELLEXECUTEINFOW()
+        info.cbSize = ctypes.sizeof(info)
+        info.fMask = SEE_MASK_INVOKEIDLIST
+        info.hwnd = _find_owner(owner_title) if owner_title else 0
+        info.lpVerb = "properties"
+        info.lpFile = path
+        info.nShow = SW_SHOWNORMAL
+        if not _shell32_le.ShellExecuteExW(byref(info)):
+            raise ctypes.WinError(ctypes.get_last_error())
+
     def pick_folder(initial: Optional[str] = None, title: str = "Select folder",
                     owner_title: Optional[str] = None) -> Optional[str]:
         hr = ole32.CoInitializeEx(None, COINIT_APARTMENTTHREADED)
@@ -125,3 +158,6 @@ else:  # pragma: no cover - other platforms
     def pick_folder(initial: Optional[str] = None, title: str = "Select folder",
                     owner_title: Optional[str] = None) -> Optional[str]:
         raise OSError("Native folder picker is only available on Windows")
+
+    def show_properties(path: str, owner_title: Optional[str] = None) -> None:
+        raise OSError("The Properties dialog is only available on Windows")
