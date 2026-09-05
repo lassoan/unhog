@@ -9,6 +9,11 @@ local space goes and free it up.
 
 ![Unhog showing where the local space in a OneDrive folder goes](docs/images/home.png)
 
+The treemap fills in while the folder is being scanned, so large folders can
+be explored right away, with a progress bar showing how far the scan has got.
+Optionally the free space on the drive is drawn next to the folder, on the
+same scale, to show how much the local copies matter.
+
 ## Download
 
 **[Download Unhog.zip (latest release)](https://github.com/lassoan/unhog/releases/latest/download/Unhog.zip)**
@@ -47,9 +52,11 @@ Unhog.exe D:\Other
 
 Unhog only shows where the space goes; it does not delete or change anything.
 To free the space a file or folder uses, right-click it in Unhog and choose
-*Open in Explorer* (for a file: *Open containing folder in Explorer*), then in
-Explorer right-click the item and choose **Free up space**. The file stays in
-the cloud and is downloaded again when you open it.
+*Open folder in Explorer* (the item is selected there), then in Explorer
+right-click it and choose **Free up space**. The file stays in
+the cloud and is downloaded again when you open it. Back in Unhog, right-click
+the folder and choose *Rescan* to see the result without scanning everything
+again.
 
 ## How to use
 

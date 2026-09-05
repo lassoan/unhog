@@ -32,9 +32,19 @@ current time, so the **Modified** filter behaves the same whenever it is run.
 Nothing is read from or written to disk; *Open in Explorer* on a demo item
 therefore opens nothing useful.
 
+The demo "scan" is not instant: `demo_scan` replays the generated tree file by
+file through the same `TreeBuilder` the real scanner uses, spread over about
+8 seconds (`DEMO_SCAN_SECONDS`), so the live-updating treemap can be watched
+filling in. Callers that need the tree at once pass `duration=0`, as the tests
+and the screenshot tool do. `demo_disk_usage` supplies made-up drive figures
+for the free-space tile.
+
 ## Layout
 
-- `unhog/scanner.py` walks the folder tree and builds the size model.
+- `unhog/scanner.py` walks the folder tree and builds the size model. Its
+  `TreeBuilder` adds every file to the totals of all folders above it as soon
+  as it is found and reports the growing tree to a progress callback, so the
+  app can draw the treemap while the scan is still running.
 - `unhog/treemap.py` lays out the squarified treemap and does hit testing.
 - `unhog/app.py` is the Dear PyGui user interface.
 - `unhog/win_dialogs.py` wraps the native Windows folder picker via ctypes.
@@ -51,6 +61,46 @@ local disk. The scanner reads attributes from the directory listing
 
 This attribute only exists on Windows. On other platforms every file currently
 counts as local, so the app degrades to a plain disk-usage treemap.
+
+## Drawing while scanning
+
+The scan runs in a worker thread and grows the tree in place; the UI thread
+lays out and draws that same tree while the scan runs, at most every
+`LIVE_REDRAW_S` seconds and, after a slow redraw (very large trees), no sooner
+than `LIVE_REDRAW_BUDGET` times the redraw's own duration, so the UI stays
+responsive. No lock is taken: attribute updates are atomic under the GIL, and
+`TreeBuilder` adds a file to the totals of its parent folders before appending
+it to its folder's children, so a folder never shows less than its visible
+contents. A redraw may see a folder whose children do not yet add up to its
+total; the next redraw corrects it. The drive figures behind the optional
+free-space tile and the whole-drive progress bar come from `shutil.disk_usage`,
+fetched by the same worker before the scan starts.
+
+*Rescan* in the right-click menu scans one folder again in place:
+`scanner.detach` takes the old subtree's numbers out of the folders above and
+unlinks it, an empty node is attached where it was, and `scanner.scan_into`
+fills that node, propagating totals upwards as usual, so the treemap shows the
+folder filling in. `scanner.refresh_upwards` then restores child order, newest
+file and pinned state up the chain. The demo uses `demo_rescan`, which replays
+the matching part of the demo tree.
+
+Dear PyGui normally runs widget callbacks on its own thread. The app switches
+that off (`manual_callback_management`) and runs the queued callbacks itself
+at the start of every frame, so button, combo and mouse handlers execute on
+the UI thread and can never rebuild the drawlist while a live redraw is in
+progress. Mouse moves only set a flag; the hover tooltip is redrawn once per
+frame.
+
+## Progress estimate
+
+`TreeBuilder.progress` judges how far a scan has got from folders alone, since
+nothing is known about a folder's size before it is scanned. `enter_dir`
+records how many subfolders a folder has and `finish_dir` counts them off; the
+estimate is the share of the root's subfolders finished, plus the current
+one's share times the same estimate one level down, and so on. It never goes
+backwards and reaches 1 when the root is finished. When a whole drive is
+scanned the app ignores it and shows bytes found against the drive's used
+bytes instead, which is exact.
 
 ## Tests
 
@@ -112,7 +162,7 @@ python tools/make_screenshots.py
 
 This opens the app window briefly, drives it through the scenes listed in
 `tools/make_screenshots.py` (home view, a folder zoomed in, the "Older than
-1 year" filter, and "Local files only" unchecked) and writes one PNG per
+1 year" filter, "Local files only" unchecked, and "Show free space" checked) and writes one PNG per
 scene using Dear PyGui's frame-buffer capture. It must run on Windows with
 Segoe UI installed so the text matches what users see. The window is set to
 a fixed size, so the images have the same dimensions every time. Re-render
@@ -121,7 +171,7 @@ commit the PNGs together with the change. The dates in tooltips shift with the
 time of rendering, which is expected.
 
 To add a scene, add a block to `ScreenshotApp.shoot()`: navigate with
-`set_view`, `set_modified` or `set_local_only`, call `hover` on the node to
+`set_view`, `set_modified`, `set_local_only` or `set_show_free`, call `hover` on the node to
 show a tooltip for, then `save` with the file name. Reference the new image
 from `USAGE.md` (or `README.md` for the overview image). To change what the demo tree contains, edit `unhog/demo.py`
 and run the tests, which check that the tree is internally consistent.

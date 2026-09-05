@@ -6,18 +6,21 @@ import datetime
 import math
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
 import time
-from typing import Callable, Optional
+import webbrowser
+from typing import Any, Callable, Optional
 
 import dearpygui.dearpygui as dpg
 
 from . import __version__
-from .scanner import Node, ProgressCallback, ScanCancelled, apply_filter, default_root, format_size, scan
+from .scanner import (Node, ProgressCallback, ScanCancelled, apply_filter, default_root, detach,
+                      format_size, refresh_upwards, scan, scan_into)
 from .treemap import Item, hit_test, layout, local_size, open_aggregate, total_size
-from .win_dialogs import pick_folder
+from .win_dialogs import pick_folder, show_properties
 
 FONT_SIZE = 15          # UI widgets and unscaled treemap labels
 FONT_MIN, FONT_MAX = 10, 34  # label size range when "Scale by size" is on
@@ -35,6 +38,8 @@ PAD_CHOICES: dict[str, int] = {f"{px} px": px for px in (1, 2, 4, 6, 9, 12, 18, 
 DEFAULT_PAD = "12 px"
 MIN_PX = 3
 RESIZE_SETTLE_S = 0.12
+LIVE_REDRAW_S = 0.5     # how often the treemap is redrawn while a scan is running, at most
+LIVE_REDRAW_BUDGET = 4  # after a live redraw, pause at least this many times its duration
 
 KB, MB, GB = 1024, 1024 ** 2, 1024 ** 3
 MIN_SIZE_CHOICES: dict[str, int] = {
@@ -44,7 +49,10 @@ MIN_SIZE_CHOICES: dict[str, int] = {
 }
 DEFAULT_MIN_SIZE = "1 MB"
 MAX_HISTORY = 100       # views remembered for Back
-WINDOW_TITLE = f"Unhog {__version__}"
+APP_NAME = "Unhog"
+AUTHOR = "Andras Lasso"
+WEBSITE = "https://github.com/lassoan/unhog"
+WINDOW_TITLE = f"{APP_NAME} {__version__}"
 
 DAY = 86400.0
 # "Modified" filter: label -> (mode, age in seconds). Files are compared against
@@ -99,12 +107,16 @@ FOLDER_BORDER = (24, 26, 30)
 FOLDER_PASSTHROUGH = (96, 98, 104)  # folder failing the Modified filter, shown only as a parent
 TEXT = (235, 235, 235)
 TEXT_DIM = (200, 200, 205)
+LINK = (110, 170, 255)
 HOVER = (255, 255, 120)
 HOVER_THICKNESS = 4
 BACKGROUND = (20, 21, 24)
-TOOLTIP_BG = (30, 32, 38)
+TOOLTIP_BG = (36, 46, 68)     # blue-tinted, so tooltips do not look like the (gray) right-click menu
 AGGREGATE_FILL = (72, 72, 78)
-TOOLTIP_BORDER = (120, 124, 132)
+TOOLTIP_BORDER = (128, 150, 200)
+FREE_FILL = (40, 43, 49)      # "Show free space" tile: dark, hatched, clearly not a file
+FREE_HATCH = (66, 70, 78)
+FREE_HATCH_STEP = 14
 
 
 def file_color(node: Node, depth: int):
@@ -131,16 +143,33 @@ def folder_color(node: Node, depth: int):
 
 # Anything that builds a tree the way ``scanner.scan`` does (see also ``demo.demo_scan``).
 Scanner = Callable[[str, Optional[ProgressCallback], Optional[threading.Event]], Node]
+# Anything that fills an empty folder node the way ``scanner.scan_into`` does (``demo.demo_rescan``).
+Rescanner = Callable[[Node, Optional[ProgressCallback], Optional[threading.Event]], Node]
+# ``shutil.disk_usage`` or a stand-in: path -> object with ``total`` and ``free`` bytes.
+DiskUsage = Callable[[str], Any]
 
 
 class UnhogApp:
-    def __init__(self, root_path: Optional[str] = None, scanner: Scanner = scan):
+    def __init__(self, root_path: Optional[str] = None, scanner: Scanner = scan,
+                 disk_usage: DiskUsage = shutil.disk_usage, rescanner: Rescanner = scan_into):
         self.root_path = root_path or default_root()
         self.scanner = scanner
-        self.tree: Optional[Node] = None
+        self.rescanner = rescanner
+        self.disk_usage = disk_usage
+        self.rescan_parent: Optional[Node] = None  # set while one folder is being scanned again
+        self.rescan_node: Optional[Node] = None    # the (initially empty) node that scan fills
+        self.tree: Optional[Node] = None           # the tree being shown; grows while scanning
+        self.tree_filtered = False                 # ``apply_filter`` has run with a real filter
+        self.scanning = False
+        self.progress_estimate = 0.0               # from the scanner: share of folders done
+        self.next_live_redraw = 0.0
+        self.disk: Any = None                      # disk usage of the scanned folder's drive
+        self.free_node: Optional[Node] = None      # synthetic tile for the drive's free space
+        self.show_free = False
         self.view: Optional[Node] = None
         self.items: list[Item] = []
         self.hovered: Optional[Item] = None
+        self.hover_dirty = False                   # mouse moved: refresh the tooltip next frame
         self.context_node: Optional[Node] = None
         self.msgs: "queue.Queue[tuple]" = queue.Queue()
         self.cancel = threading.Event()
@@ -163,6 +192,10 @@ class UnhogApp:
 
     def build(self) -> None:
         dpg.create_context()
+        # Callbacks are run by ``frame`` on the UI thread instead of DPG's own
+        # callback thread, so a click can never redraw the treemap while a live
+        # redraw is halfway through (that could deadlock inside DPG).
+        dpg.configure_app(manual_callback_management=True)
         self._setup_font()
         self._setup_theme()
 
@@ -186,24 +219,26 @@ class UnhogApp:
                 self.modified_combo = dpg.add_combo(items=list(MODIFIED_CHOICES), default_value=DEFAULT_MODIFIED,
                                                     width=170, callback=self._on_modified)
                 dpg.add_spacer(width=12)
-                dpg.add_button(label="Preferences...", callback=self._show_preferences)
+                dpg.add_button(label="Settings...", callback=self._show_settings)
             with dpg.group(horizontal=True):  # navigation + breadcrumb
                 dpg.add_button(label="Back", callback=self._on_back)
-                dpg.add_button(label="Up", callback=self._on_up)
-                dpg.add_button(label="Home", callback=self._on_home)
+                dpg.add_button(label="Zoom out", callback=self._on_up)
+                dpg.add_button(label="Zoom full", callback=self._on_home)
                 dpg.add_spacer(width=12)
                 dpg.add_text("Current folder:")
                 with dpg.group(horizontal=True) as self.breadcrumb:
                     dpg.add_text("")
-            self.status = dpg.add_text("Ready.")
+            with dpg.group(horizontal=True):
+                self.progress_bar = dpg.add_progress_bar(default_value=0.0, width=220, show=False)
+                self.status = dpg.add_text("Ready.")
             self.drawlist = dpg.add_drawlist(width=100, height=100)
             if self.draw_font is not None:
                 dpg.bind_item_font(self.drawlist, self.draw_font)
             self.main_layer = dpg.add_draw_layer(parent=self.drawlist)
             self.overlay_layer = dpg.add_draw_layer(parent=self.drawlist)
 
-        with dpg.window(label="Preferences", modal=True, show=False, autosize=True,
-                        no_collapse=True, no_saved_settings=True) as self.prefs_window:
+        with dpg.window(label="Settings", modal=True, show=False, autosize=True,
+                        no_collapse=True, no_saved_settings=True) as self.settings_window:
             dpg.add_checkbox(label="Scale fonts and padding by folder size",
                              default_value=self.scale_fonts, callback=self._on_scale_fonts)
             dpg.add_spacer(height=4)
@@ -219,27 +254,51 @@ class UnhogApp:
                               width=160, callback=self._on_pad_scaling)
             dpg.add_text("Share of the padding that the smallest folders keep.", color=TEXT_DIM)
             dpg.add_spacer(height=8)
+            self.show_free_check = dpg.add_checkbox(label="Show free space on the drive",
+                                                    default_value=self.show_free, callback=self._on_show_free)
+            dpg.add_text("A hatched tile beside the folder, on the same scale.", color=TEXT_DIM)
+            dpg.add_spacer(height=8)
+            dpg.add_separator()
+            dpg.add_spacer(height=4)
+            dpg.add_text("About")
+            with dpg.group() as about:  # single-spaced lines
+                dpg.add_text(f"{APP_NAME} {__version__}", color=TEXT_DIM)
+                dpg.add_text(f"Author: {AUTHOR}", color=TEXT_DIM)
+                with dpg.group(horizontal=True):
+                    dpg.add_text("Website:", color=TEXT_DIM)
+                    # Plain text (so it lines up with the label) made clickable below.
+                    self.website_link = dpg.add_text(WEBSITE, color=LINK)
+            dpg.bind_item_theme(about, self.tight_theme)
+            dpg.add_spacer(height=8)
             dpg.add_button(label="Close", width=100,
-                           callback=lambda: dpg.configure_item(self.prefs_window, show=False))
+                           callback=lambda: dpg.configure_item(self.settings_window, show=False))
 
         with dpg.window(popup=True, no_title_bar=True, show=False, autosize=True,
                         no_move=True) as self.context_menu:
-            self.ctx_open = dpg.add_selectable(label="Open in Explorer", callback=self._ctx_open)
-            self.ctx_reveal = dpg.add_selectable(label="Open containing folder in Explorer",
-                                                 callback=self._ctx_reveal)
-            self.ctx_zoom = dpg.add_selectable(label="Show only this folder", callback=self._ctx_zoom)
-            dpg.add_separator()
             self.ctx_back = dpg.add_selectable(label="Back", callback=self._ctx_back)
+            self.ctx_zoom = dpg.add_selectable(label="Zoom in", callback=self._ctx_zoom)
+            self.ctx_nav_sep = dpg.add_separator()
+            self.ctx_open = dpg.add_selectable(label="Open in Explorer", callback=self._ctx_open)
+            # For a file: its folder. For a folder: the parent, with the folder selected.
+            self.ctx_folder = dpg.add_selectable(label="Open folder in Explorer", callback=self._ctx_reveal)
             self.ctx_copy = dpg.add_selectable(label="Copy path", callback=self._ctx_copy)
+            self.ctx_props = dpg.add_selectable(label="Open Properties", callback=self._ctx_properties)
+            self.ctx_rescan_sep = dpg.add_separator()
+            self.ctx_rescan = dpg.add_selectable(label="Rescan", callback=self._ctx_rescan)
 
         self.file_dialog = dpg.add_file_dialog(directory_selector=True, show=False, modal=True,
                                                width=760, height=460, callback=self._on_dir_chosen,
                                                default_path=self.root_path)
 
+        with dpg.item_handler_registry() as link_handlers:
+            dpg.add_item_clicked_handler(callback=lambda: webbrowser.open(WEBSITE))
+        dpg.bind_item_handler_registry(self.website_link, link_handlers)
+
         with dpg.handler_registry():
             dpg.add_mouse_move_handler(callback=self._on_mouse_move)
             dpg.add_mouse_double_click_handler(button=dpg.mvMouseButton_Left, callback=self._on_double_click)
             dpg.add_mouse_click_handler(button=dpg.mvMouseButton_Right, callback=self._on_right_click)
+            dpg.add_key_press_handler(key=dpg.mvKey_Escape, callback=self._on_escape)
 
         dpg.create_viewport(title=WINDOW_TITLE, width=1280, height=820)
         dpg.setup_dearpygui()
@@ -266,6 +325,12 @@ class UnhogApp:
                 dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 6, 3)
                 dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 6, 6)
         dpg.bind_theme(theme)
+        with dpg.theme() as self.tight_theme:  # single-spaced lines of text
+            with dpg.theme_component(dpg.mvAll):
+                # Text items are laid out at frame height, so the vertical frame
+                # padding has to go too, not just the spacing between items.
+                dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 6, 2)
+                dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 6, 0)
 
     # -- main loop -----------------------------------------------------------
 
@@ -273,11 +338,20 @@ class UnhogApp:
         self.build()
         self.start_scan(self.root_path)
         while dpg.is_dearpygui_running():
-            self._drain_messages()
-            self._track_size()
-            dpg.render_dearpygui_frame()
+            self.frame()
         self.cancel.set()
         dpg.destroy_context()
+
+    def frame(self) -> None:
+        """One round of the UI loop: run queued callbacks, apply scan results, draw."""
+        jobs = dpg.get_callback_queue()
+        if jobs:
+            dpg.run_callbacks(jobs)
+        self._drain_messages()
+        self._track_size()
+        self._live_redraw()
+        self._update_hover()
+        dpg.render_dearpygui_frame()
 
     def _track_size(self) -> None:
         vw, vh = dpg.get_viewport_client_width(), dpg.get_viewport_client_height()
@@ -294,52 +368,187 @@ class UnhogApp:
             self.redraw()
 
     def _drain_messages(self) -> None:
+        """Handle what the scan thread posted. Messages carry the cancel event of
+        their scan as a token, so leftovers from a superseded scan are ignored."""
         try:
             while True:
                 msg = self.msgs.get_nowait()
-                kind = msg[0]
+                kind, token = msg[0], msg[1]
+                if token is not self.cancel:
+                    continue
                 if kind == "progress":
-                    _, seen, local, nbytes = msg
-                    dpg.set_value(self.status, f"Scanning... {seen:,} files seen, "
-                                               f"{local:,} local ({format_size(nbytes)})")
+                    _, _, t, self.progress_estimate = msg  # t: the root of what is being scanned
+                    if self.rescan_parent is None:
+                        self._adopt_tree(t)
+                    self._update_progress()
+                    verb = "Scanning" if self.rescan_parent is None else "Rescanning"
+                    dpg.set_value(self.status, f"{verb} {t.path} ... {t.total_files:,} files seen, "
+                                               f"{t.file_count:,} local ({format_size(t.size)}) so far.")
                 elif kind == "done":
-                    self.tree = msg[1]
-                    self._apply_modified_filter()
-                    self.set_view(self.tree)
+                    if self.rescan_parent is None:
+                        self._adopt_tree(msg[2])
+                    self._end_scan()
+                    self._refresh_view()
                     self._update_status()
+                elif kind == "disk":
+                    self.disk = msg[2]
+                    self._make_free_node()
+                    self._update_progress()
+                    self.redraw()
                 elif kind == "error":
-                    dpg.set_value(self.status, f"Scan failed: {msg[1]}")
+                    self._end_scan()
+                    dpg.set_value(self.status, f"Scan failed: {msg[2]}")
                 elif kind == "cancelled":
-                    pass
+                    self._end_scan()
         except queue.Empty:
             pass
+
+    def _adopt_tree(self, tree: Node) -> None:
+        """Start showing ``tree`` (the scan's root, possibly still growing)."""
+        if self.tree is tree:
+            return
+        self.tree = tree
+        self.tree_filtered = False
+        self._apply_modified_filter()
+        self.set_view(tree)
+        self.next_live_redraw = time.monotonic() + LIVE_REDRAW_S
+
+    def _live_redraw(self) -> None:
+        """While a scan runs, redraw the growing tree now and then.
+
+        Redraws are at least ``LIVE_REDRAW_S`` apart, and after a slow one
+        (huge trees) the pause grows to ``LIVE_REDRAW_BUDGET`` times its
+        duration, so the UI thread never spends most of its time redrawing.
+        """
+        if not self.scanning or self.tree is None:
+            return
+        now = time.monotonic()
+        if now < self.next_live_redraw:
+            return
+        self._refresh_view()
+        took = time.monotonic() - now
+        self.next_live_redraw = now + took + max(LIVE_REDRAW_S, LIVE_REDRAW_BUDGET * took)
+
+    def _end_scan(self) -> None:
+        self.scanning = False
+        if self.rescan_parent is not None:
+            refresh_upwards(self.rescan_parent)  # child order, newest file, pinned
+            self.rescan_parent = self.rescan_node = None
+        self._update_progress()
+
+    def _update_progress(self) -> None:
+        """Show scan progress: bytes for a whole drive, finished folders otherwise.
+
+        For a drive root the drive's used bytes are known up front, so progress
+        is the local bytes found so far against them. For a folder nothing
+        says how big it is, so the scanner's folder-based estimate is used.
+        """
+        if not self.scanning:
+            dpg.configure_item(self.progress_bar, show=False)
+            return
+        used = int(self.disk.used) if self.disk is not None else 0
+        if self.rescan_parent is None and self._scanning_whole_drive() and used > 0 and self.tree is not None:
+            frac = min(1.0, self.tree.size / used)
+            label = f"{frac:.0%}  {format_size(self.tree.size)} of {format_size(used)}"
+        else:
+            frac = self.progress_estimate
+            label = f"{frac:.0%}"
+        dpg.configure_item(self.progress_bar, show=True, overlay=label)
+        dpg.set_value(self.progress_bar, frac)
+
+    def _scanning_whole_drive(self) -> bool:
+        r"""True when the scanned folder is the root of its drive, e.g. ``C:\``."""
+        drive, rest = os.path.splitdrive(os.path.abspath(self.root_path))
+        return bool(drive) and rest.strip("\\/") == ""
+
+    def _refresh_view(self) -> None:
+        """Recompute the filter for the tree as it is now and redraw the current folder."""
+        self._apply_modified_filter()
+        self._climb_to_visible_view()
+        self.redraw()
 
     # -- scanning ------------------------------------------------------------
 
     def start_scan(self, path: str) -> None:
+        """Scan ``path`` from scratch, replacing whatever is shown."""
+        self._stop_scan()
+        self.root_path = path
+        self.tree = None
+        self.disk = None
+        self.free_node = None
+        self.rescan_parent = None
+        self.set_view(None)
+        dpg.set_value(self.path_input, path)
+        cancel = self._begin_scan(f"Scanning {path} ...")
+
+        def worker():
+            try:
+                self.msgs.put(("disk", cancel, self.disk_usage(path)))
+            except OSError:
+                pass
+            self._run_scan(lambda progress: self.scanner(path, progress, cancel), cancel)
+
+        self._launch(worker)
+
+    def rescan_folder(self, folder: Node) -> None:
+        """Scan just ``folder`` again, in place; the rest of the tree is kept.
+
+        The old subtree's numbers are taken out of the folders above, and an
+        empty node is attached in its place and filled by the scan, so the
+        treemap shows the folder filling in live and the totals stay right.
+        """
+        if folder is self.tree or folder.parent is None:
+            self.start_scan(self.root_path)
+            return
+        self._stop_scan()
+        parent = detach(folder)
+        fresh = Node(folder.name, folder.path, True, parent=parent, local=False)
+        parent.children.append(fresh)
+        self._redirect_views(folder, fresh)
+        self.rescan_parent = parent
+        self.rescan_node = fresh
+        cancel = self._begin_scan(f"Rescanning {folder.path} ...")
+        self._launch(lambda: self._run_scan(lambda progress: self.rescanner(fresh, progress, cancel), cancel))
+        self._refresh_view()
+
+    def _redirect_views(self, old: Node, new: Node) -> None:
+        """Point the current view and the Back history at ``new`` where they were inside ``old``."""
+        def redirect(node: Node) -> Node:
+            return new if old in node.ancestors() else node
+        if self.view is not None:
+            self.view = redirect(self.view)
+            self._rebuild_breadcrumb()
+        history = [redirect(n) for n in self.history]
+        self.history = [n for i, n in enumerate(history) if i == 0 or n is not history[i - 1]]
+
+    def _stop_scan(self) -> None:
         if self.scan_thread is not None and self.scan_thread.is_alive():
             self.cancel.set()
             self.scan_thread.join(timeout=5)
+
+    def _begin_scan(self, status: str) -> threading.Event:
+        """Reset the per-scan state; returns the new cancel event, which also tags the scan's messages."""
         self.cancel = threading.Event()
-        self.root_path = path
-        self.tree = None
-        self.set_view(None)
-        dpg.set_value(self.path_input, path)
-        dpg.set_value(self.status, f"Scanning {path} ...")
-        cancel = self.cancel
+        self.scanning = True
+        self.progress_estimate = 0.0
+        self._update_progress()
+        dpg.set_value(self.status, status)
+        return self.cancel
 
-        def worker():
-            def progress(seen, local, nbytes):
-                self.msgs.put(("progress", seen, local, nbytes))
-            try:
-                tree = self.scanner(path, progress, cancel)
-            except ScanCancelled:
-                self.msgs.put(("cancelled",))
-            except Exception as exc:  # noqa: BLE001
-                self.msgs.put(("error", str(exc)))
-            else:
-                self.msgs.put(("done", tree))
+    def _run_scan(self, run: Callable[[ProgressCallback], Node], cancel: threading.Event) -> None:
+        """Worker-thread body: run the scan and post its outcome for ``_drain_messages``."""
+        def progress(tree, estimate):
+            self.msgs.put(("progress", cancel, tree, estimate))
+        try:
+            tree = run(progress)
+        except ScanCancelled:
+            self.msgs.put(("cancelled", cancel))
+        except Exception as exc:  # noqa: BLE001
+            self.msgs.put(("error", cancel, str(exc)))
+        else:
+            self.msgs.put(("done", cancel, tree))
 
+    def _launch(self, worker: Callable[[], None]) -> None:
         self.scan_thread = threading.Thread(target=worker, name="scan", daemon=True)
         self.scan_thread.start()
 
@@ -356,8 +565,49 @@ class UnhogApp:
                        f"(of {t.total_files:,} files, {format_size(t.total_size)} total in {t.path}); "
                        f"{t.view_file_count:,} of them use {format_size(t.view_size)} of local storage "
                        "(online-only files drawn dimmed).")
+        if self.show_free and self.disk is not None:
+            summary += (f" {format_size(self.disk.free)} of {format_size(self.disk.total)} free on "
+                        f"{self._drive()}.")
         dpg.set_value(self.status, summary + " Double-click a folder to zoom in, "
-                                   "double-click background to go up, right-click for options.")
+                                   "double-click background to zoom out, right-click for options.")
+
+    # -- free space tile -----------------------------------------------------
+
+    def _drive(self) -> str:
+        """The drive (or share) the scanned folder is on, e.g. "C:"."""
+        return os.path.splitdrive(self.root_path)[0] or self.root_path
+
+    def _make_free_node(self) -> None:
+        """A file-like node standing for the drive's free space, laid out beside the root."""
+        if self.disk is None:
+            self.free_node = None
+            return
+        free = int(self.disk.free)
+        self.free_node = Node(f"Free space on {self._drive()}", self._drive() + os.sep, False,
+                              size=free, total_size=free, local=True)
+
+    def _free_tile_shown(self) -> bool:
+        """The tile is drawn only in the top-level view."""
+        return (self.show_free and self.free_node is not None and self.tree is not None
+                and self.view is self.tree)
+
+    def _on_show_free(self, sender, app_data) -> None:
+        self.show_free = bool(app_data)
+        self._update_status()
+        self.redraw()
+
+    @staticmethod
+    def _split_off(rect: tuple[float, float, float, float], keep: float, take: float):
+        """Cut ``rect`` along its longer side into a part with weight ``keep`` and one with ``take``."""
+        x, y, w, h = rect
+        total = keep + take
+        if total <= 0:
+            return rect, None
+        if w >= h:
+            tw = w * take / total
+            return (x, y, w - tw, h), (x + w - tw, y, tw, h)
+        th = h * take / total
+        return (x, y, w, h - th), (x, y + h - th, w, th)
 
     def _weight(self, node: Node) -> int:
         return node.view_size if self.local_only else node.view_total_size
@@ -368,7 +618,9 @@ class UnhogApp:
             return
         rule = MODIFIED_CHOICES.get(self.modified_choice)
         if rule is None:
-            apply_filter(self.tree, None)
+            if self.tree_filtered:  # resetting is a pass over the whole tree: only when needed
+                apply_filter(self.tree, None)
+                self.tree_filtered = False
             return
         mode, age = rule
         cutoff = time.time() - age
@@ -376,6 +628,7 @@ class UnhogApp:
             apply_filter(self.tree, lambda n: n.mtime < cutoff)
         else:
             apply_filter(self.tree, lambda n: n.mtime >= cutoff)
+        self.tree_filtered = True
 
     def _on_modified(self, sender, app_data) -> None:
         self.modified_choice = app_data if app_data in MODIFIED_CHOICES else DEFAULT_MODIFIED
@@ -386,10 +639,14 @@ class UnhogApp:
 
     def _climb_to_visible_view(self) -> None:
         """If the current folder has nothing to show, move up to one that has."""
+        if self.scanning and self.view is self.rescan_node:
+            return  # still empty only because its scan has just started: stay and watch it fill
         if self.view is not None and self._weight(self.view) <= 0:
             node = self.view
             while node.parent is not None and self._weight(node) <= 0:
                 node = node.parent
+            if node.parent is None and node is not self.tree and self.tree is not None:
+                node = self.tree  # the folder turned out empty and was dropped from the tree
             self.view = node
             self._rebuild_breadcrumb()
 
@@ -406,6 +663,8 @@ class UnhogApp:
         if not self.scale_fonts or self.view is None:
             return FONT_SIZE
         total = self._weight(self.view)
+        if self._free_tile_shown():
+            total += self._weight(self.free_node)  # the free tile shares the area with the root
         frac = self._weight(node) / total if total > 0 else 0.0
         return int(round(FONT_MIN + (FONT_MAX - FONT_MIN) * math.sqrt(max(0.0, min(1.0, frac)))))
 
@@ -422,9 +681,9 @@ class UnhogApp:
         scale = lo + (1.0 - lo) * math.sqrt(max(0.0, min(1.0, frac)))
         return max(1.0, round(self.pad * scale))
 
-    def _show_preferences(self) -> None:
+    def _show_settings(self) -> None:
         vw, vh = dpg.get_viewport_client_width(), dpg.get_viewport_client_height()
-        dpg.configure_item(self.prefs_window, show=True, pos=(max(0, vw // 2 - 200), max(0, vh // 3)))
+        dpg.configure_item(self.settings_window, show=True, pos=(max(0, vw // 2 - 200), max(0, vh // 3)))
 
     def _on_pad_scaling(self, sender, app_data) -> None:
         self.pad_scale_min = PAD_SCALING_CHOICES.get(app_data, PAD_SCALING_CHOICES[DEFAULT_PAD_SCALING])
@@ -544,23 +803,38 @@ class UnhogApp:
         self.items = []
         if self.view is None or w <= 0 or h <= 0:
             return
-        self.items = layout(self.view, (0, 0, w, h), min_px=MIN_PX, title_h=self._title_h_for,
+        rect, free_rect = (0.0, 0.0, float(w), float(h)), None
+        if self._free_tile_shown():
+            rect, free_rect = self._split_off(rect, self._weight(self.view), self._weight(self.free_node))
+        self.items = layout(self.view, rect, min_px=MIN_PX, title_h=self._title_h_for,
                             pad=self._pad_for, weight=local_size if self.local_only else total_size,
                             min_weight=self._effective_min_size())
+        if free_rect is not None and free_rect[2] >= MIN_PX and free_rect[3] >= MIN_PX:
+            self.items.append(Item(self.free_node, free_rect, 0))
         self._update_min_size_label()
         for item in self.items:
             self._draw_item(item)
+        self.hover_dirty = True  # the overlay was cleared: put the tooltip back next frame
 
     def _draw_item(self, item: Item) -> None:
         x, y, w, h = item.rect
         pmin, pmax = (x, y), (x + w, y + h)
         node = item.node
         fs = self._font_size_for(node)
-        if node.is_dir:
+        if node is self.free_node:
+            dpg.draw_rectangle(pmin, pmax, fill=FREE_FILL + (255,), color=FOLDER_BORDER + (255,),
+                               parent=self.main_layer)
+            self._draw_hatch(item.rect)
+            self._draw_label(node.name, x + 4, y + 2, w - 8, TEXT, fs)
+            if h >= 2 * fs + 8:
+                self._draw_label(format_size(self._weight(node)), x + 4, y + 3 + fs, w - 8, TEXT_DIM, fs)
+        elif node.is_dir:
             dpg.draw_rectangle(pmin, pmax, fill=folder_color(node, item.depth),
                                color=FOLDER_BORDER + (255,), parent=self.main_layer)
             if item.title_h > 0:
                 label = f"{node.name}  ({format_size(self._weight(node))})"
+                if self.scanning and node is self.tree:
+                    label += "  \u2013 scanning..."
                 self._draw_label(label, x + 4, y + (item.title_h - fs) / 2 - 1, w - 8, TEXT, fs)
         else:
             fill = AGGREGATE_FILL + (255,) if node.aggregate else file_color(node, item.depth)
@@ -572,6 +846,19 @@ class UnhogApp:
                 for i, line in enumerate(lines):
                     color = TEXT_DIM if node.aggregate or i > 0 else TEXT
                     self._draw_label(line, x + 3, y + 2 + i * (fs + 1), w - 6, color, fs)
+
+    def _draw_hatch(self, rect: tuple[float, float, float, float]) -> None:
+        """Diagonal lines across ``rect`` (clipped to it), marking the free-space tile."""
+        x, y, w, h = rect
+        x1, y1 = x + w, y + h
+        c = x + y + FREE_HATCH_STEP
+        while c < x1 + y1:  # each line is x + y = c
+            ax = max(x, c - y1)
+            bx = min(x1, c - y)
+            if bx > ax:
+                dpg.draw_line((ax, c - ax), (bx, c - bx), color=FREE_HATCH + (255,), thickness=1,
+                              parent=self.main_layer)
+            c += FREE_HATCH_STEP
 
     def _text_width(self, text: str, font_size: float = FONT_SIZE) -> float:
         """Rendered width of ``text`` drawn at ``font_size`` with the drawlist font."""
@@ -618,7 +905,9 @@ class UnhogApp:
         lines = [n.path]
         filtered = self.modified_choice != DEFAULT_MODIFIED
         suffix = f" (modified {self.modified_choice.lower()})" if filtered else ""
-        if n.aggregate:
+        if n is self.free_node:
+            lines = self._free_tooltip()
+        elif n.aggregate:
             lines[0] = f"{n.name} below the size limit in {n.path}"
             lines.append(f"Local: {format_size(n.view_size)} in {n.view_file_count:,} files{suffix}")
             lines.append(f"Total: {format_size(n.view_total_size)} in {n.view_total_files:,} files{suffix}")
@@ -653,6 +942,17 @@ class UnhogApp:
             dpg.draw_text((tx + 6, ty + 4 + i * line_h), t, size=FONT_SIZE,
                           color=(TEXT if i == 0 else TEXT_DIM) + (255,), parent=self.overlay_layer)
 
+    def _free_tooltip(self) -> list[str]:
+        total, free = int(self.disk.total), int(self.disk.free)
+        lines = [f"Free space on {self._drive()}",
+                 f"Free: {format_size(free)} of {format_size(total)}"
+                 + (f" ({free / total:.0%})" if total > 0 else "")]
+        shown = self._weight(self.tree) if self.tree is not None else 0
+        if shown > 0 and free > 0:
+            what = "The local files shown" if self.local_only else "The files shown"
+            lines.append(f"{what} use {format_size(shown)}, {shown / free:.1f}x the free space")
+        return lines
+
     # -- mouse ---------------------------------------------------------------
 
     def _mouse_in_drawing(self) -> Optional[tuple[float, float]]:
@@ -668,8 +968,16 @@ class UnhogApp:
         return hit_test(self.items, *pos)
 
     def _on_mouse_move(self) -> None:
+        self.hover_dirty = True  # several moves per frame are common: handle them once, in ``frame``
+
+    def _update_hover(self) -> None:
+        """Outline and tooltip for the item under the mouse, refreshed at most once per frame."""
         if dpg.is_item_shown(self.context_menu):
+            self.hover_dirty = True  # refresh as soon as the menu closes, even if the mouse is still
             return
+        if not self.hover_dirty:
+            return
+        self.hover_dirty = False
         pos = self._mouse_in_drawing()
         item = hit_test(self.items, *pos) if pos is not None and self.items else None
         if item is None and self.hovered is None:
@@ -694,18 +1002,41 @@ class UnhogApp:
             self.set_view(node)
 
     def _on_right_click(self) -> None:
-        item = self._item_under_mouse()
-        if item is None:
+        menu_was_open = dpg.is_item_shown(self.context_menu)
+        pos = self._mouse_in_drawing()
+        if pos is None and menu_was_open:
+            # While the menu is up the drawlist does not count as hovered, so find
+            # the spot by hand: the click that closes the menu also opens it anew.
+            mx, my = dpg.get_mouse_pos(local=False)
+            x0, y0 = dpg.get_item_rect_min(self.drawlist)
+            w, h = self.drawlist_size
+            if 0 <= mx - x0 < w and 0 <= my - y0 < h:
+                pos = (float(mx - x0), float(my - y0))
+        item = hit_test(self.items, *pos) if pos is not None and self.items else None
+        if item is None or item.node is self.free_node:
+            self._close_menu()
             return
+        if menu_was_open:
+            self._close_menu()  # toggle it, so that it reopens at the new position
+            self.hovered = item  # and move the highlight to the item the menu is now about
+            self._draw_overlay(*pos)
         self.context_node = item.node
-        is_dir = item.node.is_dir
-        is_agg = item.node.aggregate
-        dpg.configure_item(self.ctx_open, show=is_dir or is_agg)  # aggregate path is its folder
-        dpg.configure_item(self.ctx_zoom, show=(is_dir or is_agg) and item.node is not self.view,
-                           label="Show contents" if is_agg else "Show only this folder")
-        dpg.configure_item(self.ctx_reveal, show=not is_dir and not is_agg)
-        dpg.configure_item(self.ctx_back, show=bool(self.history))
-        for sel in (self.ctx_open, self.ctx_reveal, self.ctx_zoom, self.ctx_back, self.ctx_copy):
+        folder_like = item.node.is_dir or item.node.aggregate  # an aggregate's path is its folder
+        path = item.node.path.rstrip("\\/")
+        has_parent = bool(path) and os.path.dirname(path) not in ("", path)  # not a drive root
+        back = bool(self.history)
+        # Zoom in is what double-clicking does: show this folder (or the folded items).
+        zoom_in = folder_like and item.node is not self.view
+        dpg.configure_item(self.ctx_back, show=back)
+        dpg.configure_item(self.ctx_zoom, show=zoom_in)
+        dpg.configure_item(self.ctx_nav_sep, show=back or zoom_in)
+        dpg.configure_item(self.ctx_open, show=folder_like)
+        dpg.configure_item(self.ctx_folder, show=has_parent)
+        dpg.configure_item(self.ctx_props, show=sys.platform == "win32")
+        dpg.configure_item(self.ctx_rescan_sep, show=not self.scanning)
+        dpg.configure_item(self.ctx_rescan, show=not self.scanning)
+        for sel in (self.ctx_back, self.ctx_zoom, self.ctx_open, self.ctx_folder, self.ctx_copy,
+                    self.ctx_props, self.ctx_rescan):
             dpg.set_value(sel, False)
         dpg.configure_item(self.context_menu, show=True, pos=dpg.get_mouse_pos(local=False))
 
@@ -714,15 +1045,31 @@ class UnhogApp:
     def _close_menu(self) -> None:
         dpg.configure_item(self.context_menu, show=False)
 
+    def _on_escape(self) -> None:
+        """Escape closes the right-click menu or the Settings window, whichever is open."""
+        if dpg.is_item_shown(self.context_menu):
+            self._close_menu()
+        elif dpg.is_item_shown(self.settings_window):
+            dpg.configure_item(self.settings_window, show=False)
+
     def _ctx_open(self) -> None:
         self._close_menu()
         if self.context_node is not None:
             open_in_explorer(self.context_node.path)
 
     def _ctx_reveal(self) -> None:
+        """Open the item's folder in Explorer with the item selected."""
         self._close_menu()
         if self.context_node is not None:
             reveal_in_explorer(self.context_node.path)
+
+    def _ctx_properties(self) -> None:
+        self._close_menu()
+        if self.context_node is not None:
+            try:
+                show_properties(self.context_node.path, owner_title=WINDOW_TITLE)
+            except OSError as exc:
+                dpg.set_value(self.status, f"Could not open Properties: {exc}")
 
     def _ctx_zoom(self) -> None:
         self._close_menu()
@@ -732,6 +1079,16 @@ class UnhogApp:
     def _ctx_back(self) -> None:
         self._close_menu()
         self.go_back()
+
+    def _ctx_rescan(self) -> None:
+        """Scan the item's folder again: the folder itself, or a file's (or tile's) folder."""
+        self._close_menu()
+        node = self.context_node
+        if node is None or self.scanning:
+            return
+        folder = node if node.is_dir and not node.aggregate else node.parent
+        if folder is not None:
+            self.rescan_folder(folder)
 
     def _ctx_copy(self) -> None:
         self._close_menu()
@@ -757,9 +1114,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if "--demo" in argv:
         # Made-up folder tree instead of a disk scan: for trying the UI and for screenshots.
-        from .demo import DEMO_ROOT, demo_scan
+        from .demo import DEMO_ROOT, demo_disk_usage, demo_rescan, demo_scan
         argv = [a for a in argv if a != "--demo"]
-        UnhogApp(argv[0] if argv else DEMO_ROOT, scanner=demo_scan).run()
+        UnhogApp(argv[0] if argv else DEMO_ROOT, scanner=demo_scan, disk_usage=demo_disk_usage,
+                 rescanner=demo_rescan).run()
         return 0
     root = argv[0] if argv else None
     if root is not None and not os.path.isdir(root):

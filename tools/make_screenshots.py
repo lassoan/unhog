@@ -16,13 +16,14 @@ from __future__ import annotations
 import os
 import sys
 import time
+from functools import partial
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import dearpygui.dearpygui as dpg  # noqa: E402
 
 from unhog.app import RESIZE_SETTLE_S, UnhogApp  # noqa: E402
-from unhog.demo import DEMO_ROOT, demo_scan  # noqa: E402
+from unhog.demo import DEMO_ROOT, demo_disk_usage, demo_rescan, demo_scan  # noqa: E402
 from unhog.scanner import Node  # noqa: E402
 
 WIDTH, HEIGHT = 1280, 800  # viewport client size; the PNGs come out this big
@@ -38,14 +39,14 @@ def find(tree: Node, rel_path: str) -> Node:
 
 class ScreenshotApp(UnhogApp):
     def __init__(self, out_dir: str):
-        super().__init__(DEMO_ROOT, scanner=demo_scan)
+        # The demo scan is normally paced over several seconds; here it must be instant.
+        super().__init__(DEMO_ROOT, scanner=partial(demo_scan, duration=0), disk_usage=demo_disk_usage,
+                         rescanner=partial(demo_rescan, duration=0))
         self.out_dir = out_dir
 
     def frames(self, n: int) -> None:
         for _ in range(n):
-            self._drain_messages()
-            self._track_size()
-            dpg.render_dearpygui_frame()
+            self.frame()
 
     def settle(self) -> None:
         """Let the scan result arrive and the resize debounce run out."""
@@ -59,6 +60,7 @@ class ScreenshotApp(UnhogApp):
         x, y, w, h = item.rect
         self.hovered = item
         self._draw_overlay(x + w * 0.5, y + min(h * 0.5, 40))
+        self.hover_dirty = False  # keep it: the real mouse position must not replace this hover
 
     def save(self, name: str) -> str:
         path = os.path.join(self.out_dir, name + ".png")
@@ -74,6 +76,10 @@ class ScreenshotApp(UnhogApp):
     def set_local_only(self, value: bool) -> None:
         dpg.set_value(self.local_only_check, value)
         self._on_local_only(None, value)
+
+    def set_show_free(self, value: bool) -> None:
+        dpg.set_value(self.show_free_check, value)
+        self._on_show_free(None, value)
 
     def shoot(self) -> list[str]:
         self.build()
@@ -107,6 +113,13 @@ class ScreenshotApp(UnhogApp):
         self.frames(2)
         self.hover(find(self.tree, "Virtual Machines\\Windows 10 test.vhdx"))
         out.append(self.save("all-files"))
+
+        # 5. The drive's free space shown next to the folder.
+        self.set_local_only(True)
+        self.set_show_free(True)
+        self.frames(2)
+        self.hover(self.free_node)
+        out.append(self.save("free-space"))
 
         self.cancel.set()
         dpg.destroy_context()

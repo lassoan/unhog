@@ -3,13 +3,29 @@
 Download and run Unhog as described in [README.md](README.md). This page explains
 the controls and settings.
 
+The treemap appears as soon as the scan starts and fills in while it runs; a
+progress bar and the status line show how far it has got, and the folder title
+says "scanning". You can hover, zoom and use every control before the scan is
+finished. Sizes grow until the status line reports the final totals. For a
+whole drive (such as `C:\`) the progress bar compares the bytes found with the
+drive's used space; for a folder nothing says in advance how big it is, so the
+bar is an estimate from the folders found but not yet finished.
+
 - **Hover** a rectangle for its full path, local size and file counts.
-- **Double-click a folder** to show only that folder's contents. Double-click the
-  background (or the current folder's title bar) to go back up. The breadcrumb
-  row and the **Up** / **Home** buttons navigate too. **Back** (button, or in
-  the right-click menu) returns to the previously shown view, step by step.
-- **Right-click a folder** for *Open in Explorer*, *Show only this folder* and
-  *Copy path*. Right-click a file for *Open containing folder in Explorer*.
+- **Double-click a folder** to zoom in: show only that folder's contents.
+  Double-click the background (or the current folder's title bar) to zoom out
+  one level. The breadcrumb row and the **Zoom out** / **Zoom full** buttons
+  navigate too; **Zoom full** returns to the whole scanned folder. **Back**
+  (button, or in the right-click menu) returns to the previously shown view,
+  step by step.
+- **Right-click** an item for a menu: **Back** (when there is a view to
+  return to) and *Zoom in* (the same as double-clicking a folder); then *Open
+  in Explorer* (folders), *Open folder in Explorer* (a file's folder, or a
+  folder's parent with the folder selected), *Copy path* and *Open Properties*
+  (the Windows Properties dialog); and *Rescan*, which reads just that folder
+  (for a file, its folder) again and updates the treemap in place, handy after
+  freeing space in Explorer. Entries that do not apply are left out. **Escape**
+  closes the menu (and the Settings window).
 - **Browse...** / the folder box + **Rescan** scan a different folder.
 - **Modified** filters by last-modified time: "Older than …" (1 month to
   5 years) or "Newer than …" (1 week to 1 year). Only matching files count
@@ -27,15 +43,17 @@ the controls and settings.
 - **Min size** (default 1 MB) hides files and folders smaller than the limit as
   separate rectangles. Within each folder they are folded into one grey
   "N smaller items" tile that carries their combined size, so the parent's area
-  stays accurate. Double-click that tile (or right-click it and choose *Show
-  contents*) to view the folded items on their own; the limit shrinks with the
+  stays accurate. Double-click that tile (or right-click it and choose *Zoom
+  in*) to view the folded items on their own; the limit shrinks with the
   view, so they appear individually. Right-click the tile to open its folder
   in Explorer. "Off" shows everything. The limit applies to the scanned root: when you drill into
   a folder it shrinks in proportion to that folder's share of the total, so you
   see the same level of detail at every depth. The effective limit for the
   current folder is shown next to the dropdown.
 
-**Preferences...** opens a dialog with the appearance settings:
+**Settings...** opens a dialog with the appearance settings, followed by an
+*About* section with the version, author and website (click the address to
+open it in your browser):
 
 - **Scale fonts and padding by folder size** (on by default) grows folder
   titles (and file labels) with the item's share of the folder currently
@@ -48,6 +66,12 @@ the controls and settings.
   smaller folders get: the percentage is what the smallest folders keep of the
   chosen padding, from 100% (uniform) down to 5%. Default is Firm (20%).
   Only applies while scaling by size is on.
+- **Show free space on the drive** (off by default) adds a hatched dark tile
+  for the free space on the drive the scanned folder is on, sized on the same
+  scale as the folder, so you can see at a glance how the space the files take
+  compares with what is left on the disk.
+  The tile appears only in the top-level view. Hover it for the exact numbers;
+  the status line shows them too.
 
 Files are colored by type (video, image, audio, document, archive, code, disk
 image, other) and shaded darker the deeper they sit.
@@ -65,3 +89,8 @@ have newer files too and are shown only as containers:
 online-only files are dimmed:
 
 ![Unhog showing all files, online-only ones dimmed](docs/images/all-files.png)
+
+**Show free space on the drive** checked: the free space on drive C: appears
+as a hatched tile next to the OneDrive folder, on the same scale:
+
+![Unhog showing the drive's free space next to the folder](docs/images/free-space.png)
