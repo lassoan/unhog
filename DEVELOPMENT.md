@@ -91,6 +91,17 @@ the UI thread and can never rebuild the drawlist while a live redraw is in
 progress. Mouse moves only set a flag; the hover tooltip is redrawn once per
 frame.
 
+## Display scaling
+
+`win_dialogs.ui_scale` declares the process DPI-aware (otherwise Windows
+renders it at 96 DPI and stretches the bitmap, which blurs all text) and
+returns the display scale. `app.py` calls it at import time, before the
+viewport exists, and puts every pixel size through `px()`, so fonts, widget
+widths and treemap paddings keep their physical size at 100%, 150% or 200%
+scaling. Setting `UNHOG_SCALE` (for example `1.25`) overrides the detected
+scale; the screenshot tool sets it to `1` so the images do not depend on the
+machine that renders them.
+
 ## Progress estimate
 
 `TreeBuilder.progress` judges how far a scan has got from folders alone, since

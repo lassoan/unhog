@@ -20,10 +20,21 @@ from . import __version__
 from .scanner import (Node, ProgressCallback, ScanCancelled, apply_filter, default_root, detach,
                       format_size, refresh_upwards, scan, scan_into)
 from .treemap import Item, hit_test, layout, local_size, open_aggregate, total_size
-from .win_dialogs import pick_folder, show_properties
+from .win_dialogs import pick_folder, show_properties, ui_scale
 
-FONT_SIZE = 15          # UI widgets and unscaled treemap labels
-FONT_MIN, FONT_MAX = 10, 34  # label size range when "Scale by size" is on
+# Sizes below are designed for 96 DPI and multiplied by the display scale, so
+# the app looks the same size at any scaling but is rendered crisply (the call
+# also makes the process DPI-aware; it has to happen before the viewport exists).
+UI_SCALE = ui_scale()
+
+
+def px(design_px: float) -> int:
+    """Design pixels (96 DPI) to real pixels at the display scale."""
+    return int(round(design_px * UI_SCALE))
+
+
+FONT_SIZE = px(15)      # UI widgets and unscaled treemap labels
+FONT_MIN, FONT_MAX = px(10), px(34)  # label size range when "Scale by size" is on
 # How strongly folder padding shrinks with folder size ("Padding scaling"):
 # the fraction of the chosen padding that the smallest folders still get.
 PAD_SCALING_CHOICES: dict[str, float] = {
@@ -31,12 +42,12 @@ PAD_SCALING_CHOICES: dict[str, float] = {
     "Medium (30%)": 0.3, "Firm (20%)": 0.2, "Strong (10%)": 0.1, "Extreme (5%)": 0.05,
 }
 DEFAULT_PAD_SCALING = "Firm (20%)"
-DRAW_FONT_PX = 36       # native size of the drawlist font; labels are scaled down from it
-TITLE_PAD = 5           # title strip height = label font size + TITLE_PAD
+DRAW_FONT_PX = px(36)   # native size of the drawlist font; labels are scaled down from it
+TITLE_PAD = px(5)       # title strip height = label font size + TITLE_PAD
 # Inner margin of a folder around its children (the parent shows as a frame).
-PAD_CHOICES: dict[str, int] = {f"{px} px": px for px in (1, 2, 4, 6, 9, 12, 18, 24, 32)}
+PAD_CHOICES: dict[str, int] = {f"{p} px": px(p) for p in (1, 2, 4, 6, 9, 12, 18, 24, 32)}
 DEFAULT_PAD = "12 px"
-MIN_PX = 3
+MIN_PX = px(3)
 RESIZE_SETTLE_S = 0.12
 LIVE_REDRAW_S = 0.5     # how often the treemap is redrawn while a scan is running, at most
 LIVE_REDRAW_BUDGET = 4  # after a live redraw, pause at least this many times its duration
@@ -109,14 +120,14 @@ TEXT = (235, 235, 235)
 TEXT_DIM = (200, 200, 205)
 LINK = (110, 170, 255)
 HOVER = (255, 255, 120)
-HOVER_THICKNESS = 4
+HOVER_THICKNESS = px(4)
 BACKGROUND = (20, 21, 24)
 TOOLTIP_BG = (36, 46, 68)     # blue-tinted, so tooltips do not look like the (gray) right-click menu
 AGGREGATE_FILL = (72, 72, 78)
 TOOLTIP_BORDER = (128, 150, 200)
 FREE_FILL = (40, 43, 49)      # "Show free space" tile: dark, hatched, clearly not a file
 FREE_HATCH = (66, 70, 78)
-FREE_HATCH_STEP = 14
+FREE_HATCH_STEP = px(14)
 
 
 def file_color(node: Node, depth: int):
@@ -202,34 +213,34 @@ class UnhogApp:
         with dpg.window(tag="main") as self.main:
             with dpg.group(horizontal=True):
                 dpg.add_text("Folder:")
-                self.path_input = dpg.add_input_text(default_value=self.root_path, width=340,
+                self.path_input = dpg.add_input_text(default_value=self.root_path, width=px(340),
                                                      on_enter=True, callback=self._on_path_enter)
                 dpg.add_button(label="Browse...", callback=self._on_browse)
                 dpg.add_button(label="Rescan", callback=self._on_rescan)
-                dpg.add_spacer(width=12)
+                dpg.add_spacer(width=px(12))
                 self.local_only_check = dpg.add_checkbox(label="Local files only", default_value=True,
                                                          callback=self._on_local_only)
-                dpg.add_spacer(width=12)
+                dpg.add_spacer(width=px(12))
                 dpg.add_text("Min size:")
                 dpg.add_combo(items=list(MIN_SIZE_CHOICES), default_value=DEFAULT_MIN_SIZE,
-                              width=90, callback=self._on_min_size)
+                              width=px(90), callback=self._on_min_size)
                 self.min_size_label = dpg.add_text("", color=TEXT_DIM)
-                dpg.add_spacer(width=12)
+                dpg.add_spacer(width=px(12))
                 dpg.add_text("Modified:")
                 self.modified_combo = dpg.add_combo(items=list(MODIFIED_CHOICES), default_value=DEFAULT_MODIFIED,
-                                                    width=170, callback=self._on_modified)
-                dpg.add_spacer(width=12)
+                                                    width=px(170), callback=self._on_modified)
+                dpg.add_spacer(width=px(12))
                 dpg.add_button(label="Settings...", callback=self._show_settings)
             with dpg.group(horizontal=True):  # navigation + breadcrumb
                 dpg.add_button(label="Back", callback=self._on_back)
                 dpg.add_button(label="Zoom out", callback=self._on_up)
                 dpg.add_button(label="Zoom full", callback=self._on_home)
-                dpg.add_spacer(width=12)
+                dpg.add_spacer(width=px(12))
                 dpg.add_text("Current folder:")
                 with dpg.group(horizontal=True) as self.breadcrumb:
                     dpg.add_text("")
             with dpg.group(horizontal=True):
-                self.progress_bar = dpg.add_progress_bar(default_value=0.0, width=220, show=False)
+                self.progress_bar = dpg.add_progress_bar(default_value=0.0, width=px(220), show=False)
                 self.status = dpg.add_text("Ready.")
             self.drawlist = dpg.add_drawlist(width=100, height=100)
             if self.draw_font is not None:
@@ -241,25 +252,25 @@ class UnhogApp:
                         no_collapse=True, no_saved_settings=True) as self.settings_window:
             dpg.add_checkbox(label="Scale fonts and padding by folder size",
                              default_value=self.scale_fonts, callback=self._on_scale_fonts)
-            dpg.add_spacer(height=4)
+            dpg.add_spacer(height=px(4))
             with dpg.group(horizontal=True):
                 dpg.add_text("Padding:")
-                dpg.add_combo(items=list(PAD_CHOICES), default_value=DEFAULT_PAD, width=110,
+                dpg.add_combo(items=list(PAD_CHOICES), default_value=DEFAULT_PAD, width=px(110),
                               callback=self._on_pad)
             dpg.add_text("Frame width a folder draws around its children.", color=TEXT_DIM)
-            dpg.add_spacer(height=4)
+            dpg.add_spacer(height=px(4))
             with dpg.group(horizontal=True):
                 dpg.add_text("Padding scaling:")
                 dpg.add_combo(items=list(PAD_SCALING_CHOICES), default_value=DEFAULT_PAD_SCALING,
-                              width=160, callback=self._on_pad_scaling)
+                              width=px(160), callback=self._on_pad_scaling)
             dpg.add_text("Share of the padding that the smallest folders keep.", color=TEXT_DIM)
-            dpg.add_spacer(height=8)
+            dpg.add_spacer(height=px(8))
             self.show_free_check = dpg.add_checkbox(label="Show free space on the drive",
                                                     default_value=self.show_free, callback=self._on_show_free)
             dpg.add_text("A hatched tile beside the folder, on the same scale.", color=TEXT_DIM)
-            dpg.add_spacer(height=8)
+            dpg.add_spacer(height=px(8))
             dpg.add_separator()
-            dpg.add_spacer(height=4)
+            dpg.add_spacer(height=px(4))
             dpg.add_text("About")
             with dpg.group() as about:  # single-spaced lines
                 dpg.add_text(f"{APP_NAME} {__version__}", color=TEXT_DIM)
@@ -269,8 +280,8 @@ class UnhogApp:
                     # Plain text (so it lines up with the label) made clickable below.
                     self.website_link = dpg.add_text(WEBSITE, color=LINK)
             dpg.bind_item_theme(about, self.tight_theme)
-            dpg.add_spacer(height=8)
-            dpg.add_button(label="Close", width=100,
+            dpg.add_spacer(height=px(8))
+            dpg.add_button(label="Close", width=px(100),
                            callback=lambda: dpg.configure_item(self.settings_window, show=False))
 
         with dpg.window(popup=True, no_title_bar=True, show=False, autosize=True,
@@ -287,7 +298,7 @@ class UnhogApp:
             self.ctx_rescan = dpg.add_selectable(label="Rescan", callback=self._ctx_rescan)
 
         self.file_dialog = dpg.add_file_dialog(directory_selector=True, show=False, modal=True,
-                                               width=760, height=460, callback=self._on_dir_chosen,
+                                               width=px(760), height=px(460), callback=self._on_dir_chosen,
                                                default_path=self.root_path)
 
         with dpg.item_handler_registry() as link_handlers:
@@ -300,7 +311,7 @@ class UnhogApp:
             dpg.add_mouse_click_handler(button=dpg.mvMouseButton_Right, callback=self._on_right_click)
             dpg.add_key_press_handler(key=dpg.mvKey_Escape, callback=self._on_escape)
 
-        dpg.create_viewport(title=WINDOW_TITLE, width=1280, height=820)
+        dpg.create_viewport(title=WINDOW_TITLE, width=px(1280), height=px(820))
         dpg.setup_dearpygui()
         dpg.show_viewport()
         dpg.set_primary_window(self.main, True)
@@ -321,16 +332,16 @@ class UnhogApp:
         with dpg.theme() as theme:
             with dpg.theme_component(dpg.mvAll):
                 dpg.add_theme_color(dpg.mvThemeCol_WindowBg, BACKGROUND)
-                dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 8, 6)
-                dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 6, 3)
-                dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 6, 6)
+                dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, px(8), px(6))
+                dpg.add_theme_style(dpg.mvStyleVar_FramePadding, px(6), px(3))
+                dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, px(6), px(6))
         dpg.bind_theme(theme)
         with dpg.theme() as self.tight_theme:  # single-spaced lines of text
             with dpg.theme_component(dpg.mvAll):
                 # Text items are laid out at frame height, so the vertical frame
                 # padding has to go too, not just the spacing between items.
-                dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 6, 2)
-                dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 6, 0)
+                dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, px(6), px(2))
+                dpg.add_theme_style(dpg.mvStyleVar_FramePadding, px(6), 0)
 
     # -- main loop -----------------------------------------------------------
 
@@ -356,8 +367,8 @@ class UnhogApp:
     def _track_size(self) -> None:
         vw, vh = dpg.get_viewport_client_width(), dpg.get_viewport_client_height()
         x0, y0 = dpg.get_item_rect_min(self.drawlist)
-        w = max(50, vw - x0 - 8)
-        h = max(50, vh - y0 - 8)
+        w = max(50, vw - x0 - px(8))
+        h = max(50, vh - y0 - px(8))
         if (w, h) != self.drawlist_size:
             self.drawlist_size = (w, h)
             dpg.configure_item(self.drawlist, width=w, height=h)
@@ -683,7 +694,8 @@ class UnhogApp:
 
     def _show_settings(self) -> None:
         vw, vh = dpg.get_viewport_client_width(), dpg.get_viewport_client_height()
-        dpg.configure_item(self.settings_window, show=True, pos=(max(0, vw // 2 - 200), max(0, vh // 3)))
+        dpg.configure_item(self.settings_window, show=True,
+                           pos=(max(0, vw // 2 - px(200)), max(0, vh // 3)))
 
     def _on_pad_scaling(self, sender, app_data) -> None:
         self.pad_scale_min = PAD_SCALING_CHOICES.get(app_data, PAD_SCALING_CHOICES[DEFAULT_PAD_SCALING])
@@ -825,9 +837,10 @@ class UnhogApp:
             dpg.draw_rectangle(pmin, pmax, fill=FREE_FILL + (255,), color=FOLDER_BORDER + (255,),
                                parent=self.main_layer)
             self._draw_hatch(item.rect)
-            self._draw_label(node.name, x + 4, y + 2, w - 8, TEXT, fs)
-            if h >= 2 * fs + 8:
-                self._draw_label(format_size(self._weight(node)), x + 4, y + 3 + fs, w - 8, TEXT_DIM, fs)
+            self._draw_label(node.name, x + px(4), y + px(2), w - px(8), TEXT, fs)
+            if h >= 2 * fs + px(8):
+                self._draw_label(format_size(self._weight(node)), x + px(4), y + px(3) + fs, w - px(8),
+                                 TEXT_DIM, fs)
         elif node.is_dir:
             dpg.draw_rectangle(pmin, pmax, fill=folder_color(node, item.depth),
                                color=FOLDER_BORDER + (255,), parent=self.main_layer)
@@ -835,17 +848,17 @@ class UnhogApp:
                 label = f"{node.name}  ({format_size(self._weight(node))})"
                 if self.scanning and node is self.tree:
                     label += "  \u2013 scanning..."
-                self._draw_label(label, x + 4, y + (item.title_h - fs) / 2 - 1, w - 8, TEXT, fs)
+                self._draw_label(label, x + px(4), y + (item.title_h - fs) / 2 - 1, w - px(8), TEXT, fs)
         else:
             fill = AGGREGATE_FILL + (255,) if node.aggregate else file_color(node, item.depth)
             dpg.draw_rectangle(pmin, pmax, fill=fill, color=(0, 0, 0, 160), parent=self.main_layer)
-            if w >= 28 and h >= fs + 4:
+            if w >= px(28) and h >= fs + px(4):
                 lines = [node.name]
-                if h >= 2 * fs + 8:
+                if h >= 2 * fs + px(8):
                     lines.append(format_size(self._weight(node)))
                 for i, line in enumerate(lines):
                     color = TEXT_DIM if node.aggregate or i > 0 else TEXT
-                    self._draw_label(line, x + 3, y + 2 + i * (fs + 1), w - 6, color, fs)
+                    self._draw_label(line, x + px(3), y + px(2) + i * (fs + 1), w - px(6), color, fs)
 
     def _draw_hatch(self, rect: tuple[float, float, float, float]) -> None:
         """Diagonal lines across ``rect`` (clipped to it), marking the free-space tile."""
@@ -930,16 +943,17 @@ class UnhogApp:
                 lines.append(f"Modified: {when}")
         if n.pinned:
             lines.append("Always keep on this device")
-        line_h = FONT_SIZE + 3
-        tw = max(self._text_width(t) for t in lines) + 12
-        th = line_h * len(lines) + 8
+        line_h = FONT_SIZE + px(3)
+        tw = max(self._text_width(t) for t in lines) + px(12)
+        th = line_h * len(lines) + px(8)
         dw, dh = self.drawlist_size
-        tx = mx + 16 if mx + 16 + tw <= dw else max(0, mx - tw - 4)
-        ty = my + 20 if my + 20 + th <= dh else max(0, my - th - 4)
+        dx, dy = px(16), px(20)  # offset from the mouse, so the pointer does not cover the box
+        tx = mx + dx if mx + dx + tw <= dw else max(0, mx - tw - px(4))
+        ty = my + dy if my + dy + th <= dh else max(0, my - th - px(4))
         dpg.draw_rectangle((tx, ty), (tx + tw, ty + th), fill=TOOLTIP_BG + (240,),
                            color=TOOLTIP_BORDER + (255,), parent=self.overlay_layer)
         for i, t in enumerate(lines):
-            dpg.draw_text((tx + 6, ty + 4 + i * line_h), t, size=FONT_SIZE,
+            dpg.draw_text((tx + px(6), ty + px(4) + i * line_h), t, size=FONT_SIZE,
                           color=(TEXT if i == 0 else TEXT_DIM) + (255,), parent=self.overlay_layer)
 
     def _free_tooltip(self) -> list[str]:

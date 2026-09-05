@@ -19,6 +19,8 @@ import time
 from functools import partial
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# The images are laid out at 96 DPI whatever the display scale of the machine rendering them.
+os.environ.setdefault("UNHOG_SCALE", "1")
 
 import dearpygui.dearpygui as dpg  # noqa: E402
 
@@ -83,8 +85,8 @@ class ScreenshotApp(UnhogApp):
 
     def shoot(self) -> list[str]:
         self.build()
-        dpg.set_viewport_width(WIDTH)
-        dpg.set_viewport_height(HEIGHT)
+        # The client area, not the outer window: title bar and borders vary with the display scale.
+        dpg.configure_viewport(0, client_width=WIDTH, client_height=HEIGHT)
         self.start_scan(self.root_path)
         self.settle()
         assert self.tree is not None, "demo scan did not finish"

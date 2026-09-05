@@ -76,6 +76,10 @@ open it in your browser):
 Files are colored by type (video, image, audio, document, archive, code, disk
 image, other) and shaded darker the deeper they sit.
 
+Text and controls follow the Windows display scaling. To make everything
+larger or smaller than that, start Unhog with the environment variable
+`UNHOG_SCALE` set, for example `set UNHOG_SCALE=1.25` before running it.
+
 Zoomed into a folder, with the tooltip for one of its subfolders:
 
 ![Unhog zoomed into the Camera Roll folder](docs/images/folder.png)

@@ -4,12 +4,14 @@ No third-party dependency: the COM interface is driven through raw vtable
 calls. ``pick_folder`` returns the chosen path, or ``None`` if the user
 cancelled. ``show_properties`` opens Explorer's Properties dialog for a file
 or folder. Both raise ``OSError`` on non-Windows platforms or on failure so
-callers can fall back to something else.
+callers can fall back to something else. ``ui_scale`` makes the process
+DPI-aware and reports the display scale.
 """
 
 from __future__ import annotations
 
 import ctypes
+import os
 import sys
 from ctypes import POINTER, byref, c_void_p, c_wchar_p
 from typing import Optional
@@ -79,6 +81,31 @@ if sys.platform == "win32":
                     ("hProcess", wintypes.HANDLE)]
 
     _shell32_le = ctypes.WinDLL("shell32", use_last_error=True)
+
+    PROCESS_SYSTEM_DPI_AWARE = 1
+
+    def ui_scale() -> float:
+        """Declare this process DPI-aware and return the display scale (1.0 at 96 DPI).
+
+        Without the declaration Windows renders the app at 96 DPI and stretches
+        the bitmap to the display's scale, which blurs every glyph. It must be
+        called before any window exists. The ``UNHOG_SCALE`` environment
+        variable overrides the returned scale (the screenshots use 1).
+        """
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(PROCESS_SYSTEM_DPI_AWARE)
+        except (AttributeError, OSError):
+            try:
+                user32.SetProcessDPIAware()
+            except (AttributeError, OSError):
+                pass
+        override = os.environ.get("UNHOG_SCALE")
+        if override:
+            return float(override)
+        try:
+            return user32.GetDpiForSystem() / 96.0
+        except (AttributeError, OSError):
+            return 1.0
 
     def show_properties(path: str, owner_title: Optional[str] = None) -> None:
         """Open the Explorer Properties dialog for ``path`` (the "properties" shell verb).
@@ -161,3 +188,6 @@ else:  # pragma: no cover - other platforms
 
     def show_properties(path: str, owner_title: Optional[str] = None) -> None:
         raise OSError("The Properties dialog is only available on Windows")
+
+    def ui_scale() -> float:
+        return float(os.environ.get("UNHOG_SCALE") or 1.0)
