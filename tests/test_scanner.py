@@ -9,7 +9,11 @@ from unhog.scanner import (
     FILE_ATTRIBUTE_UNPINNED,
     Node,
     ScanCancelled,
+    TreeBuilder,
     apply_filter,
+    detach,
+    refresh_upwards,
+    scan_into,
     format_size,
     is_local,
     is_pinned,
@@ -53,7 +57,7 @@ class ScanTests(unittest.TestCase):
 
     def test_sizes_counts_and_pruning(self):
         progress = []
-        tree = scan(self.root, progress_cb=lambda *a: progress.append(a))
+        tree = scan(self.root, progress_cb=lambda t, p: progress.append((t, p)))
         self.assertEqual(tree.size, 1500)
         self.assertEqual(tree.file_count, 3)
         self.assertEqual(tree.total_files, 4)  # includes the zero-byte file
@@ -65,8 +69,12 @@ class ScanTests(unittest.TestCase):
         deep = next(c for c in sub.children if c.is_dir)
         self.assertEqual(deep.size, 200)
         self.assertEqual([n.name for n in deep.ancestors()], [tree.name, "sub", "deep"])
+        # Progress reports the root of the growing tree and an estimate; the last
+        # call sees the tree complete.
         self.assertTrue(progress)
-        self.assertEqual(progress[-1], (4, 3, 1500))
+        self.assertEqual(progress[-1][1], 1.0)
+        self.assertIs(progress[-1][0], tree)
+        self.assertEqual((tree.total_files, tree.file_count, tree.size), (4, 3, 1500))
         # Plain files on a local disk are local, so total sizes equal local sizes.
         self.assertEqual(tree.total_size, 1500)
         self.assertEqual(sub.total_size, 500)
@@ -81,10 +89,138 @@ class ScanTests(unittest.TestCase):
         with self.assertRaises(ScanCancelled):
             scan(self.root, cancel=ev)
 
+    def test_rescan_one_folder_in_place(self):
+        tree = scan(self.root)
+        sub = next(c for c in tree.children if c.name == "sub")
+        # The folder changes on disk: one file grows, a new one appears.
+        write(os.path.join(self.root, "sub", "a.txt"), 900)
+        write(os.path.join(self.root, "sub", "deep", "c.txt"), 50)
+        parent = detach(sub)
+        self.assertIs(parent, tree)
+        self.assertIsNone(sub.parent)
+        self.assertEqual((tree.size, tree.file_count, tree.total_files), (1000, 1, 2))
+        self.assertEqual([c.name for c in tree.children], ["big.bin"])
+        fresh = Node("sub", sub.path, True, parent=tree, local=False)
+        tree.children.append(fresh)
+        seen = []
+        self.assertIs(scan_into(fresh, progress_cb=lambda t, p: seen.append(t)), fresh)
+        self.assertTrue(all(t is fresh for t in seen))
+        self.assertEqual((fresh.size, fresh.file_count, fresh.total_files), (1150, 3, 3))
+        # The totals above were kept current while the folder was scanned into place.
+        self.assertEqual((tree.size, tree.file_count, tree.total_files), (2150, 4, 5))
+        tree.children.reverse()  # out of order on purpose
+        refresh_upwards(tree)
+        self.assertEqual([c.name for c in tree.children], ["sub", "big.bin"])
+        self.assertEqual(tree.mtime, max(c.mtime for c in tree.children))
+        self.assertTrue(tree.local)
+
     def test_missing_root(self):
         tree = scan(os.path.join(self.root, "does_not_exist"))
         self.assertEqual(tree.size, 0)
         self.assertEqual(tree.children, [])
+
+
+class TreeBuilderTests(unittest.TestCase):
+    def test_totals_are_kept_current_while_building(self):
+        root = Node("root", r"C:\root", True, local=False)
+        b = TreeBuilder(root)
+        sub = b.add_dir(root, "sub", r"C:\root\sub")
+        deep = b.add_dir(sub, "deep", r"C:\root\sub\deep")
+        self.assertEqual([c.name for c in root.children], ["sub"])  # attached at once
+        f = b.add_file(deep, "a.bin", r"C:\root\sub\deep\a.bin", 200, True, 50.0)
+        self.assertIs(f.parent, deep)
+        # Before any folder is finished, every ancestor already counts the file.
+        for node in (deep, sub, root):
+            self.assertEqual((node.size, node.total_size, node.file_count, node.total_files), (200, 200, 1, 1))
+            self.assertEqual(node.mtime, 50.0)
+            self.assertTrue(node.local)
+        b.add_file(sub, "cloud.bin", r"C:\root\sub\cloud.bin", 1000, False, 80.0)
+        self.assertEqual((sub.size, sub.total_size, sub.file_count, sub.total_files), (200, 1200, 1, 2))
+        self.assertEqual((root.size, root.total_size, root.file_count, root.total_files), (200, 1200, 1, 2))
+        self.assertEqual(root.mtime, 80.0)
+        self.assertEqual(deep.mtime, 50.0)
+        # Empty files are counted but not shown, and do not move folder times.
+        self.assertIsNone(b.add_file(sub, "empty.txt", r"C:\root\sub\empty.txt", 0, True, 999.0))
+        self.assertEqual((sub.total_files, root.total_files), (3, 3))
+        self.assertEqual(root.mtime, 80.0)
+        self.assertEqual(len(sub.children), 2)
+        b.finish_dir(deep)
+        b.finish_dir(sub)
+        self.assertEqual([c.name for c in sub.children], ["cloud.bin", "deep"])  # sorted by total size
+        self.assertIs(b.finish(), root)
+
+    def test_progress_estimate_from_folders(self):
+        root = Node("root", r"C:\root", True, local=False)
+        b = TreeBuilder(root)
+        self.assertEqual(b.progress(), 1.0)  # nothing open: finished (or not started)
+        b.enter_dir(root, 4)                 # root has four subfolders
+        self.assertEqual(b.progress(), 0.0)
+        a = b.add_dir(root, "a", r"C:\root\a")
+        b.enter_dir(a, 0)                    # a leaf folder: no idea how far into it we are
+        self.assertEqual(b.progress(), 0.0)
+        b.add_file(a, "f", r"C:\root\a\f", 1, True, 1.0)
+        b.finish_dir(a)
+        self.assertEqual(b.progress(), 0.25)  # one of four done
+        c = b.add_dir(root, "c", r"C:\root\c")
+        b.enter_dir(c, 2)
+        c1 = b.add_dir(c, "c1", r"C:\root\c\c1")
+        b.enter_dir(c1, 0)
+        b.add_file(c1, "f", r"C:\root\c\c1\f", 1, True, 1.0)
+        b.finish_dir(c1)
+        self.assertAlmostEqual(b.progress(), 0.25 + 0.25 * 0.5)  # halfway through the second
+        seen = []
+        b.progress_cb = lambda t, p: seen.append(p)
+        b.finish_dir(c)
+        self.assertEqual(b.progress(), 0.5)
+        b.finish()
+        self.assertEqual(seen, [1.0])
+        self.assertEqual(b.progress(), 1.0)
+
+    def test_empty_folder_is_dropped_when_finished(self):
+        root = Node("root", r"C:\root", True, local=False)
+        b = TreeBuilder(root)
+        empty = b.add_dir(root, "empty", r"C:\root\empty")
+        b.add_file(empty, "zero.txt", r"C:\root\empty\zero.txt", 0, True, 1.0)
+        b.finish_dir(empty)
+        self.assertEqual(root.children, [])
+        self.assertIsNone(empty.parent)
+        self.assertEqual(root.total_files, 1)
+        b.finish()
+        self.assertFalse(root.local)
+
+    def test_pinned_folder_and_cancel(self):
+        root = Node("root", r"C:\root", True, local=False)
+        ev = threading.Event()
+        b = TreeBuilder(root, cancel=ev)
+        b.add_file(root, "a", r"C:\root\a", 1, True, 1.0, pinned=True)
+        b.add_file(root, "b", r"C:\root\b", 2, True, 1.0, pinned=True)
+        b.finish()
+        self.assertTrue(root.pinned)
+        ev.set()
+        with self.assertRaises(ScanCancelled):
+            b.add_file(root, "c", r"C:\root\c", 3, True, 1.0)
+
+    def test_progress_is_rate_limited(self):
+        class Eager(TreeBuilder):
+            PROGRESS_INTERVAL = 0.0  # report after every file
+
+        class Patient(TreeBuilder):
+            PROGRESS_INTERVAL = 3600.0
+
+        root = Node("root", r"C:\root", True, local=False)
+        seen = []
+        b = Eager(root, progress_cb=lambda t, p: seen.append(t))
+        for i in range(5):
+            b.add_file(root, f"f{i}", rf"C:\root\f{i}", 1, True, 1.0)
+        self.assertEqual(len(seen), 5)
+        self.assertTrue(all(n is root for n in seen))
+
+        seen.clear()
+        b = Patient(root, progress_cb=lambda t, p: seen.append((t, p)))
+        b.add_file(root, "later", r"C:\root\later", 1, True, 1.0)
+        self.assertEqual(seen, [])
+        b.finish()
+        self.assertEqual(seen, [(root, 1.0)])  # the finished tree is always reported
 
 
 class FilterTests(unittest.TestCase):

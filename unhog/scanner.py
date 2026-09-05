@@ -5,6 +5,10 @@ FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS attribute. Files without it are
 hydrated, i.e. they use local disk space. Reading attributes through
 ``os.scandir`` / ``DirEntry.stat`` uses the directory listing only and
 never opens the file, so scanning does not trigger downloads.
+
+The tree is built in place by ``TreeBuilder``: every file found is added to
+the totals of all its parent folders at once, so the partially built tree is
+always consistent enough to be drawn while the scan is still running.
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ from __future__ import annotations
 import os
 import stat as stat_mod
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -21,7 +26,10 @@ FILE_ATTRIBUTE_UNPINNED = 0x00100000
 FILE_ATTRIBUTE_RECALL_ON_OPEN = 0x00040000
 FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x00400000
 
-ProgressCallback = Callable[[int, int, int], None]  # files seen, local files, local bytes
+# Called now and then during a scan with the root of the partially built tree
+# and an estimate (0..1) of how far the scan has got, see ``TreeBuilder.progress``.
+# The root's ``total_files``, ``file_count`` and ``size`` are the running totals.
+ProgressCallback = Callable[["Node", float], None]
 
 
 def is_local(attrs: int) -> bool:
@@ -108,75 +116,146 @@ def default_root() -> str:
     return os.path.join(os.path.expanduser("~"), "OneDrive")
 
 
-class _Scanner:
-    PROGRESS_EVERY = 500
+class TreeBuilder:
+    """Grows a tree in place, keeping folder totals current after every file.
 
-    def __init__(self, progress_cb: Optional[ProgressCallback], cancel: Optional[threading.Event]):
+    Used by ``scan`` and by the demo's replayed scan. ``add_dir`` attaches a
+    folder to its parent right away and ``add_file`` adds a file's numbers to
+    every folder above it, so the tree can be drawn while it is still being
+    built. ``enter_dir`` / ``finish_dir`` bracket the scan of each folder's
+    contents and feed the ``progress`` estimate. ``progress_cb`` is called
+    with the root and that estimate at most every ``PROGRESS_INTERVAL``
+    seconds; a set ``cancel`` event raises ``ScanCancelled`` at the next file.
+
+    Another thread may read the tree while it grows: attributes are updated
+    one at a time and a file is appended to its folder only after the totals
+    above it include it, so folder totals never fall behind their children.
+    """
+
+    PROGRESS_INTERVAL = 0.1
+
+    def __init__(self, root: Node, progress_cb: Optional[ProgressCallback] = None,
+                 cancel: Optional[threading.Event] = None):
+        self.root = root
         self.progress_cb = progress_cb
         self.cancel = cancel
-        self.files_seen = 0
-        self.local_files = 0
-        self.local_bytes = 0
+        self._next_progress = time.monotonic() + self.PROGRESS_INTERVAL
+        # One entry per folder whose contents are being scanned, outermost first:
+        # [subfolders finished, subfolders it has]. Drives ``progress``.
+        self._open: list[list[int]] = []
 
-    def _tick(self) -> None:
+    def add_dir(self, parent: Node, name: str, path: str) -> Node:
+        child = Node(name, path, True, parent=parent, local=False)
+        parent.children.append(child)
+        return child
+
+    def add_file(self, parent: Node, name: str, path: str, size: int, local: bool,
+                 mtime: float, pinned: bool = False) -> Optional[Node]:
+        """Record a file; returns its node, or None for an empty file (counted, not shown)."""
+        node = None
+        if size > 0:
+            node = Node(name, path, False, size=size if local else 0, file_count=1 if local else 0,
+                        total_files=1, pinned=pinned, parent=parent, total_size=size, local=local,
+                        mtime=mtime)
+        anc: Optional[Node] = parent
+        while anc is not None:
+            anc.total_files += 1
+            if size > 0:
+                anc.total_size += size
+                if local:
+                    anc.size += size
+                    anc.file_count += 1
+                    anc.local = True
+                if mtime > anc.mtime:
+                    anc.mtime = mtime
+            anc = anc.parent
+        if node is not None:
+            parent.children.append(node)
+        self.tick()
+        return node
+
+    def enter_dir(self, node: Node, subdirs: int) -> None:
+        """Call before adding ``node``'s contents; ``subdirs`` is how many folders it holds."""
+        self._open.append([0, subdirs])
+
+    def finish_dir(self, node: Node) -> None:
+        """Call once all of ``node``'s contents are added: drops it if empty, else sorts it."""
+        if self._open:
+            self._open.pop()
+            if self._open:
+                self._open[-1][0] += 1
+        if node.total_size == 0 and node.parent is not None:
+            node.parent.children.remove(node)  # nothing to show: drop empty subtree
+            node.parent = None
+            return
+        node.children.sort(key=lambda n: n.total_size, reverse=True)
+        node.pinned = bool(node.children) and all(c.pinned for c in node.children)
+
+    def progress(self) -> float:
+        """How far the scan has got, 0..1, judged by folders alone.
+
+        Nothing is known about a folder's size before it is scanned, so each
+        folder being scanned is treated as if its subfolders were equally big:
+        the estimate is the share of the root's subfolders finished, plus the
+        current one's share times the same estimate one level down, and so on.
+        This never goes backwards and ends at 1 when the root is finished.
+        """
+        frac = 0.0
+        for done, total in reversed(self._open):
+            frac = (done + frac) / total if total > 0 else 0.0
+        return 1.0 if not self._open else min(1.0, frac)
+
+    def tick(self) -> None:
+        """Check for cancellation and report progress; ``add_file`` calls this."""
         if self.cancel is not None and self.cancel.is_set():
             raise ScanCancelled()
-        if self.progress_cb is not None and self.files_seen % self.PROGRESS_EVERY == 0:
-            self.progress_cb(self.files_seen, self.local_files, self.local_bytes)
+        if self.progress_cb is not None:
+            now = time.monotonic()
+            if now >= self._next_progress:
+                self._next_progress = now + self.PROGRESS_INTERVAL
+                self.progress_cb(self.root, self.progress())
 
-    def scan_dir(self, node: Node) -> None:
+    def finish(self) -> Node:
+        """Finalize the root and report the finished tree; returns the root."""
+        self.finish_dir(self.root)
+        if self.progress_cb is not None:
+            self.progress_cb(self.root, 1.0)
+        return self.root
+
+
+def _scan_dir(builder: TreeBuilder, node: Node) -> None:
+    try:
+        entries = list(os.scandir(node.path))
+    except OSError:
+        entries = []
+    builder.enter_dir(node, sum(1 for e in entries if _is_dir(e)))
+
+    for entry in entries:
         try:
-            entries = list(os.scandir(node.path))
+            st = entry.stat(follow_symlinks=False)
         except OSError:
-            return
+            continue
+        attrs = getattr(st, "st_file_attributes", 0)
 
-        for entry in entries:
-            try:
-                st = entry.stat(follow_symlinks=False)
-            except OSError:
-                continue
-            attrs = getattr(st, "st_file_attributes", 0)
+        if entry.is_symlink():
+            continue  # avoid cycles and double counting
 
-            if entry.is_symlink():
-                continue  # avoid cycles and double counting
+        if entry.is_dir(follow_symlinks=False):
+            if attrs & stat_mod.FILE_ATTRIBUTE_REPARSE_POINT and _is_link_reparse(st):
+                continue  # junction / symlink: avoid cycles and double counting
+            child = builder.add_dir(node, entry.name, entry.path)
+            _scan_dir(builder, child)
+            builder.finish_dir(child)
+        elif entry.is_file(follow_symlinks=False):
+            builder.add_file(node, entry.name, entry.path, st.st_size, is_local(attrs), st.st_mtime,
+                             is_pinned(attrs))
 
-            if entry.is_dir(follow_symlinks=False):
-                if attrs & stat_mod.FILE_ATTRIBUTE_REPARSE_POINT and _is_link_reparse(st):
-                    continue  # junction / symlink: avoid cycles and double counting
-                child = Node(entry.name, entry.path, True, parent=node)
-                self.scan_dir(child)
-                node.total_files += child.total_files
-                node.total_size += child.total_size
-                node.size += child.size
-                node.file_count += child.file_count
-                if child.total_size > 0:
-                    node.children.append(child)
-                else:
-                    child.parent = None  # nothing to show: drop empty subtree
-            elif entry.is_file(follow_symlinks=False):
-                self.files_seen += 1
-                node.total_files += 1
-                size = st.st_size
-                local = is_local(attrs)
-                if size > 0:
-                    node.total_size += size
-                    if local:
-                        self.local_files += 1
-                        self.local_bytes += size
-                        node.size += size
-                        node.file_count += 1
-                    node.children.append(
-                        Node(entry.name, entry.path, False, size=size if local else 0,
-                             file_count=1 if local else 0, total_files=1,
-                             pinned=is_pinned(attrs), parent=node, total_size=size, local=local,
-                             mtime=st.st_mtime)
-                    )
-                self._tick()
 
-        node.children.sort(key=lambda n: n.total_size, reverse=True)
-        node.mtime = max((c.mtime for c in node.children), default=0.0)
-        node.local = node.size > 0
-        node.pinned = bool(node.children) and all(c.pinned for c in node.children)
+def _is_dir(entry: os.DirEntry) -> bool:
+    try:
+        return entry.is_dir(follow_symlinks=False)
+    except OSError:
+        return False
 
 
 IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003  # junction
@@ -200,15 +279,60 @@ def scan(root: str, progress_cb: Optional[ProgressCallback] = None,
 
     Each node records both ``size`` (bytes on local storage) and
     ``total_size`` (logical bytes incl. online-only placeholders).
-    Raises ``ScanCancelled`` if ``cancel`` is set while scanning.
+    ``progress_cb`` receives the root of the growing tree and a progress
+    estimate now and then, and once more when the scan is complete. Raises
+    ``ScanCancelled`` if ``cancel`` is set while scanning.
     """
     root = os.path.abspath(root)
-    node = Node(os.path.basename(root.rstrip("\\/")) or root, root, True)
-    scanner = _Scanner(progress_cb, cancel)
-    scanner.scan_dir(node)
-    if progress_cb is not None:
-        progress_cb(scanner.files_seen, scanner.local_files, scanner.local_bytes)
-    return node
+    node = Node(os.path.basename(root.rstrip("\\/")) or root, root, True, local=False)
+    return scan_into(node, progress_cb, cancel)
+
+
+def scan_into(node: Node, progress_cb: Optional[ProgressCallback] = None,
+              cancel: Optional[threading.Event] = None) -> Node:
+    """Scan ``node.path`` into ``node``, an empty folder node.
+
+    The node may already hang in a tree: every file found is then added to
+    the folders above it as well, so a single folder can be scanned again in
+    place (see ``detach`` and ``refresh_upwards``). Returns ``node``.
+    """
+    builder = TreeBuilder(node, progress_cb, cancel)
+    _scan_dir(builder, node)
+    return builder.finish()
+
+
+def detach(node: Node) -> Optional[Node]:
+    """Take ``node`` out of its tree, removing its numbers from every folder above.
+
+    Returns the former parent (None for a root). Used before scanning the same
+    folder again into a fresh node attached in its place.
+    """
+    parent = node.parent
+    if parent is None:
+        return None
+    parent.children.remove(node)
+    node.parent = None
+    anc: Optional[Node] = parent
+    while anc is not None:
+        anc.total_files -= node.total_files
+        anc.total_size -= node.total_size
+        anc.size -= node.size
+        anc.file_count -= node.file_count
+        anc.local = anc.size > 0
+        anc = anc.parent
+    return parent
+
+
+def refresh_upwards(folder: Node) -> None:
+    """Recompute what ``finish_dir`` derives (child order, newest file, pinned)
+    for ``folder`` and every folder above it, after a subtree was replaced."""
+    anc: Optional[Node] = folder
+    while anc is not None:
+        anc.children.sort(key=lambda n: n.total_size, reverse=True)
+        anc.mtime = max((c.mtime for c in anc.children), default=0.0)
+        anc.pinned = bool(anc.children) and all(c.pinned for c in anc.children)
+        anc.local = anc.size > 0
+        anc = anc.parent
 
 
 FilePredicate = Callable[[Node], bool]

@@ -5,6 +5,9 @@ it in place of a real disk scan (``python -m unhog --demo``). Nothing on disk
 is touched. The tree is deterministic: the same seed always gives the same
 names, sizes and modification ages (ages are relative to the time the tree is
 generated, so the "Modified" filter behaves the same whenever it is run).
+The scan is replayed file by file over ``DEMO_SCAN_SECONDS`` so the live
+treemap can be watched filling in; ``demo_disk_usage`` stands in for
+``shutil.disk_usage`` so the free-space tile has something to show.
 """
 
 from __future__ import annotations
@@ -13,11 +16,13 @@ import datetime
 import random
 import threading
 import time
+from collections import namedtuple
 from typing import Callable, Optional, Sequence
 
-from .scanner import Node, ProgressCallback
+from .scanner import Node, ProgressCallback, TreeBuilder
 
 DEMO_ROOT = r"C:\Users\Sam\OneDrive"
+DEMO_SCAN_SECONDS = 8.0  # how long the replayed demo scan takes
 
 KB = 1024
 MB = 1024 * KB
@@ -298,13 +303,86 @@ def demo_tree(root: str = DEMO_ROOT, seed: int = 7, now: Optional[float] = None)
     return _Demo(seed, time.time() if now is None else now).build(root)
 
 
-def demo_scan(root: str = DEMO_ROOT, progress_cb: Optional[ProgressCallback] = None,
-              cancel: Optional[threading.Event] = None) -> Node:
-    """Drop-in replacement for ``scanner.scan`` that returns ``demo_tree``.
+class _Pacer:
+    """Spreads ``count`` steps evenly over ``duration`` seconds.
 
-    ``root`` only names the tree; the contents are the same for any path.
+    ``wait`` sleeps until the next step is due. Steps that are already late
+    (a coarse sleep timer overshot) do not sleep, so the total stays close to
+    ``duration`` regardless of timer resolution.
     """
-    tree = demo_tree(root or DEMO_ROOT)
-    if progress_cb is not None:
-        progress_cb(tree.total_files, tree.file_count, tree.size)
-    return tree
+
+    def __init__(self, count: int, duration: float):
+        self.step = duration / max(1, count)
+        self.due = time.monotonic()
+
+    def wait(self) -> None:
+        self.due += self.step
+        delay = self.due - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+
+
+def _replay(src: Node, dst: Node, builder: TreeBuilder, pacer: _Pacer) -> None:
+    """Add ``src``'s contents to ``dst`` the way a disk scan would find them."""
+    builder.enter_dir(dst, sum(1 for c in src.children if c.is_dir))
+    for child in sorted(src.children, key=lambda n: n.name.lower()):  # directory-listing order
+        if child.is_dir:
+            copy = builder.add_dir(dst, child.name, child.path)
+            _replay(child, copy, builder, pacer)
+            builder.finish_dir(copy)
+        else:
+            pacer.wait()
+            builder.add_file(dst, child.name, child.path, child.total_size, child.local, child.mtime,
+                             child.pinned)
+
+
+def demo_scan(root: str = DEMO_ROOT, progress_cb: Optional[ProgressCallback] = None,
+              cancel: Optional[threading.Event] = None, duration: float = DEMO_SCAN_SECONDS) -> Node:
+    """Drop-in replacement for ``scanner.scan`` that "scans" ``demo_tree``.
+
+    The files are added one by one, spread over about ``duration`` seconds,
+    and ``progress_cb`` receives the growing tree just as with a real scan,
+    so the live-updating treemap can be tried without a cloud folder.
+    ``duration=0`` returns at once. ``root`` only names the tree; the contents
+    are the same for any path.
+    """
+    final = demo_tree(root or DEMO_ROOT)
+    builder = TreeBuilder(Node(final.name, final.path, True, local=False), progress_cb, cancel)
+    _replay(final, builder.root, builder, _Pacer(final.total_files, duration))
+    return builder.finish()
+
+
+def demo_rescan(node: Node, progress_cb: Optional[ProgressCallback] = None,
+                cancel: Optional[threading.Event] = None, duration: Optional[float] = None) -> Node:
+    """Stand-in for ``scanner.scan_into``: replays the demo subtree at ``node.path`` into ``node``.
+
+    ``node`` is an empty folder node hanging in a tree made by ``demo_scan``;
+    its place in that tree says which part of ``demo_tree`` to replay. Takes
+    the same share of ``DEMO_SCAN_SECONDS`` as the subtree's share of files,
+    unless ``duration`` is given.
+    """
+    chain = node.ancestors()
+    full = demo_tree(chain[0].path)
+    src = full
+    for step in chain[1:]:
+        src = next((c for c in src.children if c.name == step.name), None)
+        if src is None:
+            break
+    builder = TreeBuilder(node, progress_cb, cancel)
+    if src is not None and src.is_dir:
+        if duration is None:
+            duration = DEMO_SCAN_SECONDS * src.total_files / max(1, full.total_files)
+        _replay(src, node, builder, _Pacer(src.total_files, duration))
+    else:
+        builder.enter_dir(node, 0)
+    return builder.finish()
+
+
+DiskUsage = namedtuple("DiskUsage", "total used free")  # same fields as shutil.disk_usage
+DEMO_DISK_TOTAL = 476 * GB   # a "512 GB" drive
+DEMO_DISK_FREE = 41 * GB
+
+
+def demo_disk_usage(path: str) -> DiskUsage:
+    """Made-up drive figures for the demo, in place of ``shutil.disk_usage``."""
+    return DiskUsage(DEMO_DISK_TOTAL, DEMO_DISK_TOTAL - DEMO_DISK_FREE, DEMO_DISK_FREE)

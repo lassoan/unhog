@@ -1,8 +1,9 @@
 import threading
+import time
 import unittest
 
-from unhog.demo import DEMO_ROOT, demo_scan, demo_tree
-from unhog.scanner import Node
+from unhog.demo import DEMO_ROOT, demo_disk_usage, demo_rescan, demo_scan, demo_tree
+from unhog.scanner import Node, ScanCancelled
 
 
 def walk(node: Node):
@@ -77,16 +78,72 @@ class DemoTreeTests(unittest.TestCase):
         self.assertTrue(all(n.path.startswith("D:\\Dropbox") for n in walk(tree)))
 
 
+def snapshot(tree: Node) -> list[tuple]:
+    """Everything but modification times, which depend on when the tree was generated."""
+    return sorted((n.path, n.is_dir, n.total_size, n.size, n.file_count, n.total_files, n.local, n.pinned,
+                   [c.total_size for c in n.children]) for n in walk(tree))
+
+
 class DemoScanTests(unittest.TestCase):
-    def test_matches_scan_signature(self):
+    def test_replays_the_demo_tree(self):
         calls = []
-        tree = demo_scan(DEMO_ROOT, lambda seen, local, nbytes: calls.append((seen, local, nbytes)),
-                         threading.Event())
-        self.assertEqual(calls, [(tree.total_files, tree.file_count, tree.size)])
+        tree = demo_scan(DEMO_ROOT, lambda t, p: calls.append((t, p)), threading.Event(), duration=0)
+        self.assertEqual(snapshot(tree), snapshot(demo_tree()))
+        self.assertTrue(calls)
+        self.assertTrue(all(c[0] is tree for c in calls))
+        self.assertEqual(calls[-1][1], 1.0)
+        for node in walk(tree):
+            for child in node.children:
+                self.assertIs(child.parent, node)
+
+    def test_is_paced_and_reports_progress(self):
+        seen = []
+        estimates = []
+        t0 = time.monotonic()
+        tree = demo_scan(progress_cb=lambda n, p: (seen.append(n.total_files), estimates.append(p)),
+                         duration=0.4)
+        elapsed = time.monotonic() - t0
+        self.assertGreaterEqual(elapsed, 0.4)
+        self.assertLess(elapsed, 3.0)
+        self.assertGreaterEqual(len(seen), 3)              # partial trees were reported along the way
+        self.assertEqual(seen, sorted(seen))               # and the tree only grew
+        self.assertEqual(seen[-1], tree.total_files)
+        self.assertEqual(estimates, sorted(estimates))     # the progress estimate never goes back
+        self.assertTrue(0.0 < estimates[len(estimates) // 2] < 1.0)
+        self.assertEqual(estimates[-1], 1.0)
+
+    def test_cancel(self):
+        ev = threading.Event()
+        ev.set()
+        with self.assertRaises(ScanCancelled):
+            demo_scan(cancel=ev, duration=0)
 
     def test_defaults(self):
-        self.assertEqual(demo_scan().path, DEMO_ROOT)
-        self.assertEqual(demo_scan("").path, DEMO_ROOT)
+        self.assertEqual(demo_scan(duration=0).path, DEMO_ROOT)
+        self.assertEqual(demo_scan("", duration=0).path, DEMO_ROOT)
+
+    def test_rescan_replays_one_subtree(self):
+        tree = demo_scan(duration=0)
+        pictures = next(c for c in tree.children if c.name == "Pictures")
+        before = snapshot(tree)
+        parent = tree
+        tree.children.remove(pictures)
+        pictures.parent = None
+        for attr in ("size", "total_size", "file_count", "total_files"):
+            setattr(parent, attr, getattr(parent, attr) - getattr(pictures, attr))
+        fresh = Node("Pictures", pictures.path, True, parent=parent, local=False)
+        parent.children.append(fresh)
+        estimates = []
+        self.assertIs(demo_rescan(fresh, lambda t, p: estimates.append(p), duration=0), fresh)
+        self.assertEqual(estimates[-1], 1.0)
+        parent.children.sort(key=lambda n: n.total_size, reverse=True)
+        self.assertEqual(snapshot(tree), before)  # same tree as before, rebuilt in place
+
+    def test_disk_usage(self):
+        usage = demo_disk_usage(DEMO_ROOT)
+        self.assertEqual(usage.total, usage.used + usage.free)
+        self.assertGreater(usage.free, 0)
+        self.assertGreater(usage.total, demo_tree().total_size)  # the folder fits on the drive
 
 
 if __name__ == "__main__":
