@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=77", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unhog"
+dynamic = ["version"]
+description = "Treemap of the files that use local disk space in OneDrive, Dropbox and SharePoint folders"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Andras Lasso" }]
+requires-python = ">=3.9"
+dependencies = ["dearpygui>=2.0"]
+keywords = ["onedrive", "dropbox", "sharepoint", "files-on-demand", "treemap", "disk-usage", "disk-space"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Desktop Environment :: File Managers",
+    "Topic :: System :: Filesystems",
+    "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://github.com/lassoan/unhog"
+Documentation = "https://github.com/lassoan/unhog/blob/main/USAGE.md"
+Changelog = "https://github.com/lassoan/unhog/releases"
+Issues = "https://github.com/lassoan/unhog/issues"
+
+# A GUI script: no console window pops up when started from Explorer or the Start menu.
+[project.gui-scripts]
+unhog = "unhog.app:main"
+
+[tool.setuptools.packages.find]
+include = ["unhog*"]
+
+# The version comes from the git tag (v0.4.1 -> 0.4.1; later commits become
+# 0.4.2.devN+gHASH). It is written to unhog/_version.py, which is ignored by
+# git and shipped in the wheel and the PyInstaller builds.
+[tool.setuptools_scm]
+version_file = "unhog/_version.py"

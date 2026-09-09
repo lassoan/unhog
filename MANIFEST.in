@@ -1,0 +1,5 @@
+# setuptools-scm puts every git-tracked file into the sdist; leave out what a
+# source install does not need (the screenshots alone are over a megabyte).
+prune docs
+prune .github
+exclude .gitignore

@@ -7,7 +7,7 @@ that actually occupy local disk space. "Files On-Demand" keeps most files
 online-only; Unhog shows only the hydrated ones, so you can see where the
 local space goes and free it up.
 
-![Unhog showing where the local space in a OneDrive folder goes](docs/images/home.png)
+![Unhog showing where the local space in a OneDrive folder goes](https://raw.githubusercontent.com/lassoan/unhog/main/docs/images/home.png)
 
 The treemap fills in while the folder is being scanned, so large folders can
 be explored right away, with a progress bar showing how far the scan has got.
@@ -48,6 +48,21 @@ command prompt with the folder as argument:
 Unhog.exe D:\Other
 ```
 
+## Install with pip
+
+If Python 3.9 or later is installed, Unhog can also be installed from
+[PyPI](https://pypi.org/project/unhog/) instead of downloading the zip:
+
+```
+pip install unhog
+unhog
+```
+
+or, to keep it in its own environment, `pipx install unhog`. The `unhog`
+command takes the same optional folder argument as the exe. Windows Defender
+and SmartScreen have nothing to say about this route, since no unsigned exe is
+involved.
+
 ## Freeing up space
 
 Unhog only shows where the space goes; it does not delete or change anything.
@@ -62,7 +77,8 @@ again.
 
 Hover a rectangle for details, double-click a folder to zoom in, right-click for
 options. The toolbar filters by modification time, size and local storage.
-All controls and settings are explained in [USAGE.md](USAGE.md).
+All controls and settings are explained in
+[USAGE.md](https://github.com/lassoan/unhog/blob/main/USAGE.md).
 
 ## How it works
 
@@ -81,8 +97,8 @@ send any information anywhere.
 ## For developers
 
 Running from source, tests, building the exe and making releases are described
-in [DEVELOPMENT.md](DEVELOPMENT.md).
+in [DEVELOPMENT.md](https://github.com/lassoan/unhog/blob/main/DEVELOPMENT.md).
 
 ## License
 
-[MIT](LICENSE)
+[MIT](https://github.com/lassoan/unhog/blob/main/LICENSE)

@@ -8,6 +8,10 @@ source, testing, building the standalone exe and publishing releases.
 - Windows, Python 3.9+
 - `pip install -r requirements.txt` (only dependency: [Dear PyGui](https://github.com/hoffstadt/DearPyGui))
 
+Alternatively `pip install -e .` installs the checkout as an editable package,
+which also puts an `unhog` command on the path (the same GUI entry point the
+PyPI package provides).
+
 ## Run from source
 
 ```
@@ -150,13 +154,22 @@ window title and on the release page.
 There is no version number in the source. The version shown in the window
 title comes from git:
 
+- Running from a source checkout, `unhog/__init__.py` asks git directly, so a
+  tagged commit reports `0.1.0` and later commits something like
+  `0.1.0-3-g1a2b3c4`, with `-dirty` appended for uncommitted changes. Git is
+  consulted first so that a leftover `unhog/_version.py` from an earlier
+  build cannot show a stale version.
 - `build_exe.py` runs `git describe --tags` (or uses the `UNHOG_VERSION`
   environment variable if set) and writes the result to `unhog/_version.py`,
   which is packaged into the exe and ignored by git.
-- Running from a source checkout, `unhog/__init__.py` asks git directly, so a
-  tagged commit reports `0.1.0` and later commits something like
-  `0.1.0-3-g1a2b3c4`, with `-dirty` appended for uncommitted changes.
-- Without git or a checkout the version is `dev`.
+- The PyPI package gets its version from
+  [setuptools-scm](https://setuptools-scm.readthedocs.io/), configured in
+  `pyproject.toml`, which reads the same tag (`v0.4.1` gives `0.4.1`; an
+  untagged commit gives a PEP 440 version like `0.4.2.dev3+g1a2b3c4`) and
+  writes the same `unhog/_version.py` into the wheel. When running from an
+  installed package that file supplies the version; failing that, the
+  package metadata does.
+- Without any of these the version is `dev`.
 
 The release workflow passes the tag name as `UNHOG_VERSION`, so a release
 built from tag `v0.2.0` shows "Unhog 0.2.0".
@@ -205,3 +218,38 @@ needs to be changed before tagging.
 
 The download link in the README points at the latest release's `Unhog.zip`
 asset, so it updates automatically whenever a new release is published.
+
+### PyPI
+
+The same workflow has a second job, `pypi`, which runs after the exe build
+and tests succeed on a tag. It builds the sdist and wheel with
+`python -m build`, checks them with `twine check`, and uploads them to
+[PyPI](https://pypi.org/project/unhog/) with
+[trusted publishing](https://docs.pypi.org/trusted-publishers/), so no API
+token is stored in the repository. This needs a one-time setup:
+
+1. On PyPI, log in and open *Your account*, *Publishing*. Under *Add a new
+   pending publisher* choose GitHub and enter: PyPI project name `unhog`,
+   owner `lassoan`, repository name `unhog`, workflow name `release.yml`,
+   environment name `pypi`. (Once the project exists, the same form is under
+   the project's *Manage*, *Publishing* page.)
+2. On GitHub, in the repository's *Settings*, *Environments*, create an
+   environment named `pypi`. Optionally restrict it to tags matching `v*` or
+   require a reviewer; that is where a manual approval step for PyPI uploads
+   would go.
+
+After that, every `v*` tag publishes to PyPI. A version can only be uploaded
+once; to fix a broken release, tag a new patch version rather than re-tagging.
+
+To build and check the package locally (the files land in `dist/`):
+
+```
+pip install build twine
+python -m build
+python -m twine check dist/*
+```
+
+To try the upload path without touching the real index, `python -m twine
+upload --repository testpypi dist/*` publishes to
+[TestPyPI](https://test.pypi.org/), which needs a separate account and API
+token there.

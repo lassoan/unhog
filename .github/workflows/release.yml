@@ -50,3 +50,32 @@ jobs:
           || gh release upload "$GITHUB_REF_NAME" dist/Unhog.zip dist/Unhog.exe --clobber
         env:
           GH_TOKEN: ${{ github.token }}
+
+  # Publishes the sdist and wheel to PyPI on tag builds, after the exe build
+  # and tests above succeed. Uses PyPI trusted publishing (no API token): the
+  # project on PyPI must list this repository, workflow file and environment
+  # name as a publisher, see DEVELOPMENT.md.
+  pypi:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # setuptools-scm reads the version from the tag
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist and wheel
+        run: |
+          pip install build twine
+          python -m build
+          python -m twine check dist/*
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
