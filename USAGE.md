@@ -39,6 +39,12 @@ bar is an estimate from the folders found but not yet finished.
   on disk, and a new scan (**Browse...**, the folder box or the **Rescan**
   button) starts with nothing hidden. Rescanning a folder from the right-click
   menu keeps the hidden folders hidden.
+- On macOS the two Explorer entries read *Open in Finder* and *Open folder in
+  Finder*; on Linux, *Open in file manager* and *Open folder in file manager*.
+  Linux desktops are asked to show the folder through the standard
+  FileManager1 D-Bus interface, which GNOME Files, Dolphin, Nemo, Caja and
+  Thunar all support, so the file manager opens even when `xdg-open` would
+  send folders to the web browser; `xdg-open` is used only as a last resort.
 - **Browse...** / the folder box + **Rescan** scan a different folder.
 - **Modified** filters by last-modified time: "Older than …" (1 month to
   5 years) or "Newer than …" (1 week to 1 year). Only matching files count

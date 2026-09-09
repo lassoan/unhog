@@ -14,6 +14,7 @@ import time
 import webbrowser
 from operator import attrgetter
 from typing import Any, Callable, Optional
+from urllib.parse import quote
 
 import dearpygui.dearpygui as dpg
 
@@ -67,6 +68,8 @@ MIN_SIZE_CHOICES: dict[str, int] = {
 DEFAULT_MIN_SIZE = "1 MB"
 MAX_HISTORY = 100       # views remembered for Back
 APP_NAME = "Unhog"
+# What the right-click menu calls the file manager on this platform.
+FILE_MANAGER = {"win32": "Explorer", "darwin": "Finder"}.get(sys.platform, "file manager")
 AUTHOR = "Andras Lasso"
 WEBSITE = "https://github.com/lassoan/unhog"
 WINDOW_TITLE = f"{APP_NAME} {__version__}"
@@ -299,9 +302,10 @@ class UnhogApp:
             self.ctx_back = dpg.add_selectable(label="Back", callback=self._ctx_back)
             self.ctx_zoom = dpg.add_selectable(label="Zoom in", callback=self._ctx_zoom)
             self.ctx_nav_sep = dpg.add_separator()
-            self.ctx_open = dpg.add_selectable(label="Open in Explorer", callback=self._ctx_open)
+            self.ctx_open = dpg.add_selectable(label=f"Open in {FILE_MANAGER}", callback=self._ctx_open)
             # For a file: its folder. For a folder: the parent, with the folder selected.
-            self.ctx_folder = dpg.add_selectable(label="Open folder in Explorer", callback=self._ctx_reveal)
+            self.ctx_folder = dpg.add_selectable(label=f"Open folder in {FILE_MANAGER}",
+                                                 callback=self._ctx_reveal)
             self.ctx_copy = dpg.add_selectable(label="Copy path", callback=self._ctx_copy)
             self.ctx_props = dpg.add_selectable(label="Open Properties", callback=self._ctx_properties)
             self.ctx_rescan_sep = dpg.add_separator()
@@ -1207,17 +1211,59 @@ class UnhogApp:
 
 
 def open_in_explorer(path: str) -> None:
+    """Show the folder ``path`` in the platform's file manager."""
     if sys.platform == "win32":
         os.startfile(path)  # noqa: S606
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", path])
     else:
-        subprocess.Popen(["xdg-open", path])
+        threading.Thread(target=_show_in_file_manager, args=(path, False), daemon=True).start()
 
 
 def reveal_in_explorer(path: str) -> None:
+    """Show the folder containing ``path`` in the file manager, with ``path`` selected."""
     if sys.platform == "win32":
         subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", "-R", path])
     else:
-        subprocess.Popen(["xdg-open", os.path.dirname(path)])
+        threading.Thread(target=_show_in_file_manager, args=(path, True), daemon=True).start()
+
+
+def file_manager_commands(path: str, select: bool) -> list[list[str]]:
+    """Commands to try in turn on Linux to show ``path`` in the file manager.
+
+    The freedesktop ``org.freedesktop.FileManager1`` D-Bus interface is
+    implemented by GNOME Files, Dolphin, Nemo, Caja, Thunar and others:
+    ``ShowFolders`` opens a folder and ``ShowItems`` opens the parent with
+    the item selected. It always reaches the actual file manager, unlike
+    ``xdg-open``, which opens whatever is registered for directories and on
+    some systems ends up in the web browser; ``xdg-open`` is the last resort.
+    """
+    uri = "file://" + quote(path)  # percent-encoded, so quotes and spaces cannot break the arguments
+    method = "ShowItems" if select else "ShowFolders"
+    return [
+        ["gdbus", "call", "--session", "--dest", "org.freedesktop.FileManager1",
+         "--object-path", "/org/freedesktop/FileManager1",
+         "--method", f"org.freedesktop.FileManager1.{method}", f"['{uri}']", ""],
+        ["dbus-send", "--session", "--print-reply", "--dest=org.freedesktop.FileManager1",
+         "/org/freedesktop/FileManager1", f"org.freedesktop.FileManager1.{method}",
+         f"array:string:{uri}", "string:"],
+        ["xdg-open", os.path.dirname(path) if select else path],
+    ]
+
+
+def _show_in_file_manager(path: str, select: bool) -> None:
+    """Run ``file_manager_commands`` until one succeeds (a worker thread: D-Bus
+    calls wait for the file manager, which may take seconds to start)."""
+    for cmd in file_manager_commands(path, select):
+        if shutil.which(cmd[0]) is None:
+            continue
+        try:
+            if subprocess.run(cmd, capture_output=True, timeout=15).returncode == 0:
+                return
+        except (OSError, subprocess.SubprocessError):
+            continue
 
 
 def main(argv: Optional[list[str]] = None) -> int:
