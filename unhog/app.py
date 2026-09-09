@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import webbrowser
+from operator import attrgetter
 from typing import Any, Callable, Optional
 
 import dearpygui.dearpygui as dpg
@@ -49,8 +50,13 @@ PAD_CHOICES: dict[str, int] = {f"{p} px": px(p) for p in (1, 2, 4, 6, 9, 12, 18,
 DEFAULT_PAD = "12 px"
 MIN_PX = px(3)
 RESIZE_SETTLE_S = 0.12
-LIVE_REDRAW_S = 0.5     # how often the treemap is redrawn while a scan is running, at most
-LIVE_REDRAW_BUDGET = 4  # after a live redraw, pause at least this many times its duration
+# Live redraws while scanning compete with the scan for the interpreter (the
+# GIL serializes the two threads), so every millisecond spent redrawing is a
+# millisecond the scan stands still. Redraw at most once a second, and after
+# a slow redraw wait ten times its duration, so redrawing takes under a tenth
+# of the scan time however big the tree gets.
+LIVE_REDRAW_S = 1.0      # how often the treemap is redrawn while a scan is running, at most
+LIVE_REDRAW_BUDGET = 10  # after a live redraw, pause at least this many times its duration
 
 KB, MB, GB = 1024, 1024 ** 2, 1024 ** 3
 MIN_SIZE_CHOICES: dict[str, int] = {
@@ -892,8 +898,15 @@ class UnhogApp:
         rect, free_rect = (0.0, 0.0, float(w), float(h)), None
         if self._free_tile_shown():
             rect, free_rect = self._split_off(rect, self._weight(self.view), self._weight(self.free_node))
+        # With no filter active the raw numbers are the view numbers, and a C-level
+        # attribute getter weighs a child several times faster than the property
+        # chain; the layout weighs every child of every visible folder on each redraw.
+        if self.tree_filtered:
+            weight = local_size if self.local_only else total_size
+        else:
+            weight = attrgetter("size" if self.local_only else "total_size")
         self.items = layout(self.view, rect, min_px=MIN_PX, title_h=self._title_h_for,
-                            pad=self._pad_for, weight=local_size if self.local_only else total_size,
+                            pad=self._pad_for, weight=weight,
                             min_weight=self._effective_min_size())
         if free_rect is not None and free_rect[2] >= MIN_PX and free_rect[3] >= MIN_PX:
             self.items.append(Item(self.free_node, free_rect, 0))

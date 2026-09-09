@@ -46,9 +46,9 @@ for the free-space tile.
 ## Layout
 
 - `unhog/scanner.py` walks the folder tree and builds the size model. Its
-  `TreeBuilder` adds every file to the totals of all folders above it as soon
-  as it is found and reports the growing tree to a progress callback, so the
-  app can draw the treemap while the scan is still running.
+  `TreeBuilder` adds each folder's files to the totals of all folders above
+  as soon as the folder is listed and reports the growing tree to a progress
+  callback, so the app can draw the treemap while the scan is still running.
 - `unhog/treemap.py` lays out the squarified treemap and does hit testing.
 - `unhog/app.py` is the Dear PyGui user interface.
 - `unhog/win_dialogs.py` wraps the native Windows folder picker via ctypes.
@@ -66,17 +66,37 @@ local disk. The scanner reads attributes from the directory listing
 This attribute only exists on Windows. On other platforms every file currently
 counts as local, so the app degrades to a plain disk-usage treemap.
 
+The scan loop in `_scan_dir` runs once per entry of the scanned tree, so it
+is kept lean: on Windows the entry's kind (folder, file, symlink or junction)
+is read from the attributes the directory listing already supplied, with no
+per-entry method calls or extra system calls, and a folder's files are added
+to the tree in one batch (`TreeBuilder.add_files`), so the folders above are
+updated once per folder rather than once per file. Roughly two thirds of a
+warm-cache scan's time is now the directory listing itself.
+
 ## Drawing while scanning
 
 The scan runs in a worker thread and grows the tree in place; the UI thread
 lays out and draws that same tree while the scan runs, at most every
 `LIVE_REDRAW_S` seconds and, after a slow redraw (very large trees), no sooner
-than `LIVE_REDRAW_BUDGET` times the redraw's own duration, so the UI stays
-responsive. No lock is taken: attribute updates are atomic under the GIL, and
-`TreeBuilder` adds a file to the totals of its parent folders before appending
-it to its folder's children, so a folder never shows less than its visible
-contents. A redraw may see a folder whose children do not yet add up to its
-total; the next redraw corrects it. The drive figures behind the optional
+than `LIVE_REDRAW_BUDGET` times the redraw's own duration. No lock is taken:
+attribute updates are atomic under the GIL, and `TreeBuilder` adds a folder's
+files to the totals of the folders above before appending them to the
+folder's children, so a folder never shows less than its visible contents. A
+redraw may see a folder whose children do not yet add up to its total; the
+next redraw corrects it.
+
+The two threads do not run in parallel: both are Python code, so the GIL
+serializes them, and every millisecond the UI thread spends laying out or
+drawing is a millisecond the scan stands still (more threads would not help;
+only a separate process would, at the cost of shipping the tree across). The
+redraw limits above therefore double as a cap on how much the live view slows
+the scan: with a redraw taking `t`, redraws take at most
+`t / max(LIVE_REDRAW_S, LIVE_REDRAW_BUDGET * t)` of the time, under a tenth
+either way. The layout weighs every child of every visible folder on each
+redraw, so `redraw` uses a C-level attribute getter as the weight when no
+filter is active, and `make_aggregate` sums the folded-away small items in a
+single pass; for a 650,000-file tree a redraw takes about 60 ms. The drive figures behind the optional
 free-space tile and the whole-drive progress bar come from `shutil.disk_usage`,
 fetched by the same worker before the scan starts.
 

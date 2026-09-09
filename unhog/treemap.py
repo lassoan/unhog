@@ -127,24 +127,48 @@ def layout(root: Node, rect: Rect, min_px: float = 4.0, title_h: TitleHeight = 1
 def make_aggregate(parent: Node, small: Sequence[Node]) -> Node:
     """One tile standing in for ``small`` (children of ``parent`` below the size limit)."""
     n = len(small)
+    # One pass over the items: this runs on every redraw, and a folder can
+    # hold tens of thousands of small files.
+    size = file_count = total_files = total_size = 0
+    fsize = ftotal_size = ffile_count = ftotal_files = 0
+    pinned, local, mtime = True, False, 0.0
+    for c in small:
+        size += c.size
+        file_count += c.file_count
+        total_files += c.total_files
+        total_size += c.total_size
+        pinned = pinned and c.pinned
+        local = local or c.local
+        if c.mtime > mtime:
+            mtime = c.mtime
+        if c.fsize >= 0:  # filtered numbers, see Node.view_size
+            fsize += c.fsize
+            ftotal_size += c.ftotal_size
+            ffile_count += c.ffile_count
+            ftotal_files += c.ftotal_files
+        else:
+            fsize += c.size
+            ftotal_size += c.total_size
+            ffile_count += c.file_count
+            ftotal_files += c.total_files
     return Node(
         name=f"{n} smaller item{'s' if n != 1 else ''}",
         path=parent.path,
         is_dir=False,
-        size=sum(c.size for c in small),
-        file_count=sum(c.file_count for c in small),
-        total_files=sum(c.total_files for c in small),
-        pinned=all(c.pinned for c in small),
+        size=size,
+        file_count=file_count,
+        total_files=total_files,
+        pinned=pinned,
         parent=parent,
-        total_size=sum(c.total_size for c in small),
-        local=any(c.local for c in small),
+        total_size=total_size,
+        local=local,
         aggregate=True,
         children=list(small),  # kept so the tile can be opened; the items stay parented to ``parent``
-        fsize=sum(c.view_size for c in small),
-        ftotal_size=sum(c.view_total_size for c in small),
-        ffile_count=sum(c.view_file_count for c in small),
-        ftotal_files=sum(c.view_total_files for c in small),
-        mtime=max((c.mtime for c in small), default=0.0),
+        fsize=fsize,
+        ftotal_size=ftotal_size,
+        ffile_count=ffile_count,
+        ftotal_files=ftotal_files,
+        mtime=mtime,
     )
 
 
@@ -186,8 +210,10 @@ def _layout_into(node: Node, rect: Rect, depth: int, items: list[Item],
     if iw < min_px or ih < min_px:
         return
 
-    weighted = [(weight(c), c) for c in node.children if weight(c) > 0]
-    if min_weight > 0:
+    # Weigh each child once: the children of every visible folder are walked on
+    # each redraw, which is the bulk of a redraw's cost for big trees.
+    weighted = [(wt, c) for c in node.children if (wt := weight(c)) > 0]
+    if min_weight > 0 and weighted:
         small = [c for wt, c in weighted if wt < min_weight]
         if small:
             weighted = [(wt, c) for wt, c in weighted if wt >= min_weight]
