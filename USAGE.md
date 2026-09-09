@@ -24,8 +24,21 @@ bar is an estimate from the folders found but not yet finished.
   folder's parent with the folder selected), *Copy path* and *Open Properties*
   (the Windows Properties dialog); and *Rescan*, which reads just that folder
   (for a file, its folder) again and updates the treemap in place, handy after
-  freeing space in Explorer. Entries that do not apply are left out. **Escape**
+  freeing space in Explorer; and *Hide*, which takes that folder out of the
+  treemap (see below). Entries that do not apply are left out. **Escape**
   closes the menu (and the Settings window).
+- **Hide** (right-click menu, folders only) removes a folder from the display,
+  as if it were not there: the folders above it shrink accordingly, so the
+  rest of the treemap gets the space and the remaining items can be compared
+  without it. Use it to set aside folders that are known and wanted (a photo
+  archive, say) and see what else takes up space. Any number of folders can be
+  hidden; the status line counts them. While folders are hidden, an
+  **Unhide N folders (size)** button appears next to **Zoom full**, showing
+  how many folders are hidden and how much space they take together; click it
+  to show all of them again. Hiding is only a view setting: nothing is changed
+  on disk, and a new scan (**Browse...**, the folder box or the **Rescan**
+  button) starts with nothing hidden. Rescanning a folder from the right-click
+  menu keeps the hidden folders hidden.
 - **Browse...** / the folder box + **Rescan** scan a different folder.
 - **Modified** filters by last-modified time: "Older than …" (1 month to
   5 years) or "Newer than …" (1 week to 1 year). Only matching files count

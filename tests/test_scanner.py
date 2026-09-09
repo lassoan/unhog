@@ -270,6 +270,20 @@ class FilterTests(unittest.TestCase):
         # Raw numbers never change.
         self.assertEqual((root.size, root.total_size), (170, 177))
 
+        # Hidden folders count as empty, with or without a file filter.
+        apply_filter(root, None, {sub.path})
+        self.assertEqual((sub.view_size, sub.view_total_size, sub.view_file_count, sub.view_total_files), (0, 0, 0, 0))
+        self.assertEqual((root.view_size, root.view_total_size, root.view_file_count, root.view_total_files), (40, 47, 1, 2))
+        self.assertEqual((old.view_size, new.view_size), (100, 30))  # the contents keep their numbers
+        apply_filter(root, lambda n: n.mtime < 3000, {sub.path})
+        self.assertEqual((root.view_size, root.view_total_files), (40, 1))  # only "stale" is left
+        apply_filter(root, lambda n: n.mtime < 3000, {sub.path, stale.path})
+        self.assertEqual((root.view_size, root.view_total_files), (0, 0))
+        apply_filter(root, None, set())  # an empty hidden set is the same as none
+        self.assertEqual(root.fsize, -1)
+        self.assertEqual((root.view_size, root.view_total_files), (170, 4))
+        self.assertEqual((root.size, root.total_size), (170, 177))
+
     def test_scan_records_mtime(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "f.txt")

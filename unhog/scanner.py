@@ -18,7 +18,7 @@ import stat as stat_mod
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Callable, Container, Optional
 
 FILE_ATTRIBUTE_OFFLINE = 0x00001000
 FILE_ATTRIBUTE_PINNED = 0x00080000
@@ -348,20 +348,31 @@ def refresh_upwards(folder: Node) -> None:
 FilePredicate = Callable[[Node], bool]
 
 
-def apply_filter(root: Node, predicate: Optional[FilePredicate]) -> None:
+def apply_filter(root: Node, predicate: Optional[FilePredicate],
+                 hidden: Optional[Container[str]] = None) -> None:
     """Recompute the filtered sizes/counts (``fsize`` etc.) for the whole tree.
 
     ``predicate`` decides per file whether it counts; folders sum up their
     matching contents. ``None`` means everything counts, so the filtered
-    numbers equal the unfiltered ones.
+    numbers equal the unfiltered ones. Folders whose path is in ``hidden``
+    count as empty, so they and everything inside them drop out of the
+    totals above them (the nodes inside keep their own numbers).
     """
+    if not hidden:
+        hidden = ()
+        if predicate is None:
+            for node in _walk(root):
+                node.fsize = node.ftotal_size = node.ffile_count = node.ftotal_files = -1
+                node.fmatch = True
+            return
     if predicate is None:
-        for node in _walk(root):
-            node.fsize = node.ftotal_size = node.ffile_count = node.ftotal_files = -1
-            node.fmatch = True
-        return
+        def predicate(node: Node) -> bool:
+            return True
     for node in _walk_postorder(root):
-        if node.is_dir:
+        if node.is_dir and node.path in hidden:
+            node.fsize = node.ftotal_size = node.ffile_count = node.ftotal_files = 0
+            node.fmatch = True
+        elif node.is_dir:
             # Folders are containers: they show whatever inside them passes.
             # (A folder whose newest file passes "older than" therefore shows
             # in full; a folder with recent changes shows just its old parts.)

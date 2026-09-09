@@ -198,6 +198,7 @@ class UnhogApp:
         self.pad_scale_min = PAD_SCALING_CHOICES[DEFAULT_PAD_SCALING]
         self.history: list[Node] = []             # previous views, for Back
         self.modified_choice = DEFAULT_MODIFIED
+        self.hidden: dict[str, Node] = {}          # folders taken out of the display, by path
 
     # -- setup ---------------------------------------------------------------
 
@@ -236,6 +237,9 @@ class UnhogApp:
                 dpg.add_button(label="Zoom out", callback=self._on_up)
                 dpg.add_button(label="Zoom full", callback=self._on_home)
                 dpg.add_spacer(width=px(12))
+                # Shown only while folders are hidden; label set by _update_unhide_button.
+                self.unhide_button = dpg.add_button(label="Unhide", show=False, callback=self._on_unhide)
+                self.unhide_spacer = dpg.add_spacer(width=px(12), show=False)
                 dpg.add_text("Current folder:")
                 with dpg.group(horizontal=True) as self.breadcrumb:
                     dpg.add_text("")
@@ -296,6 +300,8 @@ class UnhogApp:
             self.ctx_props = dpg.add_selectable(label="Open Properties", callback=self._ctx_properties)
             self.ctx_rescan_sep = dpg.add_separator()
             self.ctx_rescan = dpg.add_selectable(label="Rescan", callback=self._ctx_rescan)
+            self.ctx_hide_sep = dpg.add_separator()
+            self.ctx_hide = dpg.add_selectable(label="Hide", callback=self._ctx_hide)
 
         self.file_dialog = dpg.add_file_dialog(directory_selector=True, show=False, modal=True,
                                                width=px(760), height=px(460), callback=self._on_dir_chosen,
@@ -445,7 +451,32 @@ class UnhogApp:
         if self.rescan_parent is not None:
             refresh_upwards(self.rescan_parent)  # child order, newest file, pinned
             self.rescan_parent = self.rescan_node = None
+            self._relink_hidden()
         self._update_progress()
+
+    def _relink_hidden(self) -> None:
+        """After a rescan, point hidden entries at the fresh nodes of the same path.
+
+        The rescan replaced a subtree with new nodes, so a hidden folder inside
+        it is now an orphan with stale numbers. Its path stays hidden (the
+        filter works by path); the node is only needed for the Unhide button's
+        size, so look it up again and drop entries that no longer exist.
+        """
+        if self.tree is None or not self.hidden:
+            return
+        stale = {path for path, node in self.hidden.items() if node.ancestors()[0] is not self.tree}
+        if not stale:
+            return
+        stack = [self.tree]
+        while stack and stale:
+            node = stack.pop()
+            if node.is_dir:
+                if node.path in stale:
+                    self.hidden[node.path] = node
+                    stale.discard(node.path)
+                stack.extend(node.children)
+        for path in stale:
+            del self.hidden[path]
 
     def _update_progress(self) -> None:
         """Show scan progress: bytes for a whole drive, finished folders otherwise.
@@ -488,6 +519,8 @@ class UnhogApp:
         self.disk = None
         self.free_node = None
         self.rescan_parent = None
+        self.hidden = {}
+        self._update_unhide_button()
         self.set_view(None)
         dpg.set_value(self.path_input, path)
         cancel = self._begin_scan(f"Scanning {path} ...")
@@ -579,8 +612,45 @@ class UnhogApp:
         if self.show_free and self.disk is not None:
             summary += (f" {format_size(self.disk.free)} of {format_size(self.disk.total)} free on "
                         f"{self._drive()}.")
+        if self.hidden:
+            n = len(self.hidden)
+            summary += f" {n} folder{'s' if n != 1 else ''} hidden ({format_size(self._hidden_size())})."
+        self._update_unhide_button()
         dpg.set_value(self.status, summary + " Double-click a folder to zoom in, "
                                    "double-click background to zoom out, right-click for options.")
+
+    # -- hidden folders ------------------------------------------------------
+
+    def _hidden_size(self) -> int:
+        """Bytes the hidden folders hold, in the units the treemap is drawn in."""
+        return sum(n.size if self.local_only else n.total_size for n in self.hidden.values())
+
+    def _update_unhide_button(self) -> None:
+        n = len(self.hidden)
+        if n:
+            label = f"Unhide {n} folder{'s' if n != 1 else ''} ({format_size(self._hidden_size())})"
+            dpg.configure_item(self.unhide_button, label=label, show=True)
+        else:
+            dpg.configure_item(self.unhide_button, show=False)
+        dpg.configure_item(self.unhide_spacer, show=bool(n))
+
+    def hide_folder(self, folder: Node) -> None:
+        """Take ``folder`` out of the treemap and the totals until Unhide is pressed."""
+        if not folder.is_dir or folder.aggregate or folder is self.tree or folder.parent is None:
+            return
+        self.hidden[folder.path] = folder
+        if self.view is not None and folder in self.view.ancestors():
+            self.set_view(folder.parent)  # the view was inside the hidden folder
+        self._refresh_view()
+        self._update_status()
+
+    def unhide_all(self) -> None:
+        self.hidden = {}
+        self._refresh_view()
+        self._update_status()
+
+    def _on_unhide(self) -> None:
+        self.unhide_all()
 
     # -- free space tile -----------------------------------------------------
 
@@ -628,17 +698,21 @@ class UnhogApp:
         if self.tree is None:
             return
         rule = MODIFIED_CHOICES.get(self.modified_choice)
-        if rule is None:
+        hidden = set(self.hidden)
+        if rule is None and not hidden:
             if self.tree_filtered:  # resetting is a pass over the whole tree: only when needed
                 apply_filter(self.tree, None)
                 self.tree_filtered = False
             return
-        mode, age = rule
-        cutoff = time.time() - age
-        if mode == "older":
-            apply_filter(self.tree, lambda n: n.mtime < cutoff)
+        if rule is None:
+            apply_filter(self.tree, None, hidden)
         else:
-            apply_filter(self.tree, lambda n: n.mtime >= cutoff)
+            mode, age = rule
+            cutoff = time.time() - age
+            if mode == "older":
+                apply_filter(self.tree, lambda n: n.mtime < cutoff, hidden)
+            else:
+                apply_filter(self.tree, lambda n: n.mtime >= cutoff, hidden)
         self.tree_filtered = True
 
     def _on_modified(self, sender, app_data) -> None:
@@ -1049,8 +1123,12 @@ class UnhogApp:
         dpg.configure_item(self.ctx_props, show=sys.platform == "win32")
         dpg.configure_item(self.ctx_rescan_sep, show=not self.scanning)
         dpg.configure_item(self.ctx_rescan, show=not self.scanning)
+        # A real folder (not the scanned root, not a "smaller items" tile) can be hidden.
+        can_hide = item.node.is_dir and not item.node.aggregate and item.node is not self.tree
+        dpg.configure_item(self.ctx_hide_sep, show=can_hide)
+        dpg.configure_item(self.ctx_hide, show=can_hide)
         for sel in (self.ctx_back, self.ctx_zoom, self.ctx_open, self.ctx_folder, self.ctx_copy,
-                    self.ctx_props, self.ctx_rescan):
+                    self.ctx_props, self.ctx_rescan, self.ctx_hide):
             dpg.set_value(sel, False)
         dpg.configure_item(self.context_menu, show=True, pos=dpg.get_mouse_pos(local=False))
 
@@ -1108,6 +1186,11 @@ class UnhogApp:
         self._close_menu()
         if self.context_node is not None:
             dpg.set_clipboard_text(self.context_node.path)
+
+    def _ctx_hide(self) -> None:
+        self._close_menu()
+        if self.context_node is not None:
+            self.hide_folder(self.context_node)
 
 
 def open_in_explorer(path: str) -> None:
