@@ -108,6 +108,21 @@ folder filling in. `scanner.refresh_upwards` then restores child order, newest
 file and pinned state up the chain. The demo uses `demo_rescan`, which replays
 the matching part of the demo tree.
 
+*Hide* in the right-click menu excludes a folder from scanning as well as
+from the display. `scanner.Exclusions` is shared between the app and the
+running scan: it holds the excluded paths, which `_scan_dir` skips when it
+comes to them and abandons if it finds itself inside one (the excluded
+folder is then `detach`ed from the tree, so the totals above drop it, and
+its `scanned` flag stays False), plus a queue of work the UI wants done to
+the tree. While a scan runs, the app defers tree changes (detaching a hidden
+folder, `attach`ing it back on Unhide) to that queue, which the scan thread
+runs at its next folder, so the tree is only ever modified by one thread at
+a time; with no scan running the UI thread does the work itself. Unhide
+hangs every hidden folder back under the folder of the remembered parent
+path and queues a rescan of those that were hidden mid-scan; rescans run one
+at a time through `rescan_queue`, started from `frame` when no scan is
+active.
+
 Dear PyGui normally runs widget callbacks on its own thread. The app switches
 that off (`manual_callback_management`) and runs the queued callbacks itself
 at the start of every frame, so button, combo and mouse handlers execute on

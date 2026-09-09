@@ -18,7 +18,7 @@ import stat as stat_mod
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Container, Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 FILE_ATTRIBUTE_OFFLINE = 0x00001000
 FILE_ATTRIBUTE_PINNED = 0x00080000
@@ -74,6 +74,9 @@ class Node:
     # Folders: False when the folder itself fails the active filter (judged by
     # its newest file) and is shown only as a container for matching contents.
     fmatch: bool = True
+    # Folders: False while the scan is inside it, and for good if the scan was
+    # abandoned there because the folder was excluded (see ``Exclusions``).
+    scanned: bool = True
 
     # What the treemap shows: the filtered numbers when a filter is active.
     @property
@@ -129,6 +132,62 @@ def default_root() -> str:
     return os.path.join(home, "OneDrive")
 
 
+class Exclusions:
+    """Folders a scan leaves out, shared with the UI thread that adds them while it runs.
+
+    ``paths`` holds folder paths: the scanner skips them when it comes to
+    them, and if it is inside one when the path is added it abandons that
+    folder at the next directory and carries on with the rest. ``pending``
+    holds work the UI thread wants done to the tree, such as taking the
+    excluded folder out of it (``detach``); the scan thread runs it at its
+    next opportunity, so while a scan runs every change to the tree happens
+    on that one thread. When no scan runs the UI thread runs the work itself.
+    """
+
+    def __init__(self) -> None:
+        self.paths: set[str] = set()
+        self._pending: list[Callable[[], None]] = []
+        self._lock = threading.Lock()
+
+    def add(self, path: str, work: Optional[Callable[[], None]] = None) -> None:
+        self.paths.add(path)
+        if work is not None:
+            self.defer(work)
+
+    def remove(self, path: str) -> None:
+        self.paths.discard(path)
+
+    def defer(self, work: Callable[[], None]) -> None:
+        """Queue ``work`` to be run on the scan thread (or by ``run_pending``)."""
+        with self._lock:
+            self._pending.append(work)
+
+    def run_pending(self) -> None:
+        """Run the queued work (what was queued so far; work may queue more for later)."""
+        if not self._pending:
+            return
+        with self._lock:
+            pending, self._pending = self._pending, []
+        for work in pending:
+            work()
+
+    def excluded_ancestor(self, node: Node) -> Optional[Node]:
+        """The excluded folder at or above ``node``, or None."""
+        if not self.paths:
+            return None
+        anc: Optional[Node] = node
+        while anc is not None:
+            if anc.path in self.paths:
+                return anc
+            anc = anc.parent
+        return None
+
+    def covers(self, folder: Node) -> bool:
+        """True if an excluded folder lies at or below ``folder``."""
+        prefix = folder.path.rstrip("\\/") + os.sep
+        return any(p == folder.path or p.startswith(prefix) for p in self.paths)
+
+
 class TreeBuilder:
     """Grows a tree in place, keeping folder totals current after every file.
 
@@ -151,19 +210,43 @@ class TreeBuilder:
     PROGRESS_INTERVAL = 0.1
 
     def __init__(self, root: Node, progress_cb: Optional[ProgressCallback] = None,
-                 cancel: Optional[threading.Event] = None):
+                 cancel: Optional[threading.Event] = None, exclusions: Optional[Exclusions] = None):
         self.root = root
         self.progress_cb = progress_cb
         self.cancel = cancel
+        self.exclusions = exclusions if exclusions is not None else Exclusions()
         self._next_progress = time.monotonic() + self.PROGRESS_INTERVAL
         # One entry per folder whose contents are being scanned, outermost first:
         # [subfolders finished, subfolders it has]. Drives ``progress``.
         self._open: list[list[int]] = []
 
     def add_dir(self, parent: Node, name: str, path: str) -> Node:
-        child = Node(name, path, True, parent=parent, local=False)
+        child = Node(name, path, True, parent=parent, local=False, scanned=False)
         parent.children.append(child)
         return child
+
+    def abandon_if_excluded(self, node: Node) -> bool:
+        """Called on entering ``node``: True if it lies in an excluded folder.
+
+        The excluded folder is taken out of the tree at once (if it still
+        hangs there), so the scan's effect on the totals above ends here; the
+        caller returns without listing anything. Deferred work is run too,
+        since this is where the scan thread reacts to the UI.
+        """
+        self.exclusions.run_pending()
+        excluded = self.exclusions.excluded_ancestor(node)
+        if excluded is None:
+            return False
+        if excluded.parent is not None:
+            detach(excluded)
+        self.enter_dir(node, 0)  # keep enter/finish balanced for ``progress``
+        self.tick()
+        return True
+
+    def skip_dir(self) -> None:
+        """Count a subfolder that is not scanned (excluded) as finished, for ``progress``."""
+        if self._open:
+            self._open[-1][0] += 1
 
     def add_file(self, parent: Node, name: str, path: str, size: int, local: bool,
                  mtime: float, pinned: bool = False) -> Optional[Node]:
@@ -234,17 +317,23 @@ class TreeBuilder:
         self._open.append([0, subdirs])
 
     def finish_dir(self, node: Node) -> None:
-        """Call once all of ``node``'s contents are added: drops it if empty, else sorts it."""
+        """Call once all of ``node``'s contents are added: drops it if empty, else sorts it.
+
+        A folder holding an excluded folder is kept even when empty, so the
+        excluded one has somewhere to return to when it is included again.
+        """
         if self._open:
             self._open.pop()
             if self._open:
                 self._open[-1][0] += 1
-        if node.total_size == 0 and node.parent is not None:
+        if node.total_size == 0 and node.parent is not None and not self.exclusions.covers(node):
             node.parent.children.remove(node)  # nothing to show: drop empty subtree
             node.parent = None
             return
         node.children.sort(key=lambda n: n.total_size, reverse=True)
         node.pinned = bool(node.children) and all(c.pinned for c in node.children)
+        # An excluded folder was abandoned part-way, so it is not complete.
+        node.scanned = node.path not in self.exclusions.paths
 
     def progress(self) -> float:
         """How far the scan has got, 0..1, judged by folders alone.
@@ -261,7 +350,8 @@ class TreeBuilder:
         return 1.0 if not self._open else min(1.0, frac)
 
     def tick(self) -> None:
-        """Check for cancellation and report progress; ``add_file`` calls this."""
+        """Run deferred work, check for cancellation and report progress; called per folder."""
+        self.exclusions.run_pending()
         if self.cancel is not None and self.cancel.is_set():
             raise ScanCancelled()
         if self.progress_cb is not None:
@@ -291,6 +381,8 @@ def _scan_dir(builder: TreeBuilder, node: Node) -> None:
     returned (the directory listing supplies them, no extra system call), and
     symlinks and junctions are told apart by their reparse tag.
     """
+    if builder.abandon_if_excluded(node):
+        return
     files: list[FileEntry] = []
     subdirs: list[os.DirEntry] = []
     try:
@@ -322,7 +414,11 @@ def _scan_dir(builder: TreeBuilder, node: Node) -> None:
 
     builder.enter_dir(node, len(subdirs))
     builder.add_files(node, files)
+    excluded = builder.exclusions.paths
     for entry in subdirs:
+        if entry.path in excluded:
+            builder.skip_dir()
+            continue
         child = builder.add_dir(node, entry.name, entry.path)
         _scan_dir(builder, child)
         builder.finish_dir(child)
@@ -344,29 +440,31 @@ def _is_link_reparse(st: os.stat_result) -> bool:
 
 
 def scan(root: str, progress_cb: Optional[ProgressCallback] = None,
-         cancel: Optional[threading.Event] = None) -> Node:
+         cancel: Optional[threading.Event] = None, exclusions: Optional[Exclusions] = None) -> Node:
     """Scan ``root`` and return a tree of all non-empty files and folders.
 
     Each node records both ``size`` (bytes on local storage) and
     ``total_size`` (logical bytes incl. online-only placeholders).
     ``progress_cb`` receives the root of the growing tree and a progress
     estimate now and then, and once more when the scan is complete. Raises
-    ``ScanCancelled`` if ``cancel`` is set while scanning.
+    ``ScanCancelled`` if ``cancel`` is set while scanning. Folders listed in
+    ``exclusions`` are left out, also when added while the scan runs.
     """
     root = os.path.abspath(root)
     node = Node(os.path.basename(root.rstrip("\\/")) or root, root, True, local=False)
-    return scan_into(node, progress_cb, cancel)
+    return scan_into(node, progress_cb, cancel, exclusions)
 
 
 def scan_into(node: Node, progress_cb: Optional[ProgressCallback] = None,
-              cancel: Optional[threading.Event] = None) -> Node:
+              cancel: Optional[threading.Event] = None, exclusions: Optional[Exclusions] = None) -> Node:
     """Scan ``node.path`` into ``node``, an empty folder node.
 
     The node may already hang in a tree: every file found is then added to
     the folders above it as well, so a single folder can be scanned again in
     place (see ``detach`` and ``refresh_upwards``). Returns ``node``.
     """
-    builder = TreeBuilder(node, progress_cb, cancel)
+    builder = TreeBuilder(node, progress_cb, cancel, exclusions)
+    node.scanned = False
     _scan_dir(builder, node)
     return builder.finish()
 
@@ -393,6 +491,24 @@ def detach(node: Node) -> Optional[Node]:
     return parent
 
 
+def attach(node: Node, parent: Node) -> None:
+    """Hang ``node`` (a detached subtree) under ``parent``, adding its numbers to
+    every folder above; the inverse of ``detach``. The totals are updated
+    before the node becomes visible, as everywhere else."""
+    node.parent = parent
+    anc: Optional[Node] = parent
+    while anc is not None:
+        anc.total_files += node.total_files
+        anc.total_size += node.total_size
+        anc.size += node.size
+        anc.file_count += node.file_count
+        anc.local = anc.size > 0
+        if node.mtime > anc.mtime:
+            anc.mtime = node.mtime
+        anc = anc.parent
+    parent.children.append(node)
+
+
 def refresh_upwards(folder: Node) -> None:
     """Recompute what ``finish_dir`` derives (child order, newest file, pinned)
     for ``folder`` and every folder above it, after a subtree was replaced."""
@@ -408,31 +524,20 @@ def refresh_upwards(folder: Node) -> None:
 FilePredicate = Callable[[Node], bool]
 
 
-def apply_filter(root: Node, predicate: Optional[FilePredicate],
-                 hidden: Optional[Container[str]] = None) -> None:
+def apply_filter(root: Node, predicate: Optional[FilePredicate]) -> None:
     """Recompute the filtered sizes/counts (``fsize`` etc.) for the whole tree.
 
     ``predicate`` decides per file whether it counts; folders sum up their
     matching contents. ``None`` means everything counts, so the filtered
-    numbers equal the unfiltered ones. Folders whose path is in ``hidden``
-    count as empty, so they and everything inside them drop out of the
-    totals above them (the nodes inside keep their own numbers).
+    numbers equal the unfiltered ones.
     """
-    if not hidden:
-        hidden = ()
-        if predicate is None:
-            for node in _walk(root):
-                node.fsize = node.ftotal_size = node.ffile_count = node.ftotal_files = -1
-                node.fmatch = True
-            return
     if predicate is None:
-        def predicate(node: Node) -> bool:
-            return True
-    for node in _walk_postorder(root):
-        if node.is_dir and node.path in hidden:
-            node.fsize = node.ftotal_size = node.ffile_count = node.ftotal_files = 0
+        for node in _walk(root):
+            node.fsize = node.ftotal_size = node.ffile_count = node.ftotal_files = -1
             node.fmatch = True
-        elif node.is_dir:
+        return
+    for node in _walk_postorder(root):
+        if node.is_dir:
             # Folders are containers: they show whatever inside them passes.
             # (A folder whose newest file passes "older than" therefore shows
             # in full; a folder with recent changes shows just its old parts.)

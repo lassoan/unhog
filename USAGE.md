@@ -35,10 +35,14 @@ bar is an estimate from the folders found but not yet finished.
   hidden; the status line counts them. While folders are hidden, an
   **Unhide N folders (size)** button appears next to **Zoom full**, showing
   how many folders are hidden and how much space they take together; click it
-  to show all of them again. Hiding is only a view setting: nothing is changed
-  on disk, and a new scan (**Browse...**, the folder box or the **Rescan**
-  button) starts with nothing hidden. Rescanning a folder from the right-click
-  menu keeps the hidden folders hidden.
+  to show all of them again. Hidden folders are also left out of scanning:
+  hiding a folder while the scan is still inside it stops the scan there at
+  once and continues with the rest, which is a quick way to skip a huge folder
+  you do not care about, and a right-click *Rescan* of a folder above skips
+  hidden folders too. A folder hidden mid-scan is only partly known, so the
+  button shows its size with a "+", and **Unhide** scans it properly when it
+  brings it back. Nothing is changed on disk, and a new scan (**Browse...**,
+  the folder box or the **Rescan** button) starts with nothing hidden.
 - On macOS the two Explorer entries read *Open in Finder* and *Open folder in
   Finder*; on Linux, *Open in file manager* and *Open folder in file manager*.
   Linux desktops are asked to show the folder through the standard

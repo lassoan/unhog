@@ -19,7 +19,7 @@ import time
 from collections import namedtuple
 from typing import Callable, Optional, Sequence
 
-from .scanner import Node, ProgressCallback, TreeBuilder
+from .scanner import Exclusions, Node, ProgressCallback, TreeBuilder
 
 DEMO_ROOT = r"C:\Users\Sam\OneDrive"
 DEMO_SCAN_SECONDS = 8.0  # how long the replayed demo scan takes
@@ -323,10 +323,16 @@ class _Pacer:
 
 
 def _replay(src: Node, dst: Node, builder: TreeBuilder, pacer: _Pacer) -> None:
-    """Add ``src``'s contents to ``dst`` the way a disk scan would find them."""
+    """Add ``src``'s contents to ``dst`` the way a disk scan would find them
+    (honouring the builder's exclusions like ``scanner._scan_dir`` does)."""
+    if builder.abandon_if_excluded(dst):
+        return
     builder.enter_dir(dst, sum(1 for c in src.children if c.is_dir))
     for child in sorted(src.children, key=lambda n: n.name.lower()):  # directory-listing order
         if child.is_dir:
+            if child.path in builder.exclusions.paths:
+                builder.skip_dir()
+                continue
             copy = builder.add_dir(dst, child.name, child.path)
             _replay(child, copy, builder, pacer)
             builder.finish_dir(copy)
@@ -337,7 +343,8 @@ def _replay(src: Node, dst: Node, builder: TreeBuilder, pacer: _Pacer) -> None:
 
 
 def demo_scan(root: str = DEMO_ROOT, progress_cb: Optional[ProgressCallback] = None,
-              cancel: Optional[threading.Event] = None, duration: float = DEMO_SCAN_SECONDS) -> Node:
+              cancel: Optional[threading.Event] = None, exclusions: Optional[Exclusions] = None,
+              duration: float = DEMO_SCAN_SECONDS) -> Node:
     """Drop-in replacement for ``scanner.scan`` that "scans" ``demo_tree``.
 
     The files are added one by one, spread over about ``duration`` seconds,
@@ -347,13 +354,15 @@ def demo_scan(root: str = DEMO_ROOT, progress_cb: Optional[ProgressCallback] = N
     are the same for any path.
     """
     final = demo_tree(root or DEMO_ROOT)
-    builder = TreeBuilder(Node(final.name, final.path, True, local=False), progress_cb, cancel)
+    builder = TreeBuilder(Node(final.name, final.path, True, local=False, scanned=False), progress_cb,
+                          cancel, exclusions)
     _replay(final, builder.root, builder, _Pacer(final.total_files, duration))
     return builder.finish()
 
 
 def demo_rescan(node: Node, progress_cb: Optional[ProgressCallback] = None,
-                cancel: Optional[threading.Event] = None, duration: Optional[float] = None) -> Node:
+                cancel: Optional[threading.Event] = None, exclusions: Optional[Exclusions] = None,
+                duration: Optional[float] = None) -> Node:
     """Stand-in for ``scanner.scan_into``: replays the demo subtree at ``node.path`` into ``node``.
 
     ``node`` is an empty folder node hanging in a tree made by ``demo_scan``;
@@ -368,7 +377,8 @@ def demo_rescan(node: Node, progress_cb: Optional[ProgressCallback] = None,
         src = next((c for c in src.children if c.name == step.name), None)
         if src is None:
             break
-    builder = TreeBuilder(node, progress_cb, cancel)
+    builder = TreeBuilder(node, progress_cb, cancel, exclusions)
+    node.scanned = False
     if src is not None and src.is_dir:
         if duration is None:
             duration = DEMO_SCAN_SECONDS * src.total_files / max(1, full.total_files)

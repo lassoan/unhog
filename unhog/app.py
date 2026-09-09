@@ -19,8 +19,8 @@ from urllib.parse import quote
 import dearpygui.dearpygui as dpg
 
 from . import __version__
-from .scanner import (Node, ProgressCallback, ScanCancelled, apply_filter, default_root, detach,
-                      format_size, refresh_upwards, scan, scan_into)
+from .scanner import (Exclusions, Node, ProgressCallback, ScanCancelled, apply_filter, attach,
+                      default_root, detach, format_size, refresh_upwards, scan, scan_into)
 from .treemap import Item, hit_test, layout, local_size, open_aggregate, total_size
 from .win_dialogs import pick_folder, show_properties, ui_scale
 
@@ -162,9 +162,9 @@ def folder_color(node: Node, depth: int):
 # App -----------------------------------------------------------------------
 
 # Anything that builds a tree the way ``scanner.scan`` does (see also ``demo.demo_scan``).
-Scanner = Callable[[str, Optional[ProgressCallback], Optional[threading.Event]], Node]
+Scanner = Callable[[str, Optional[ProgressCallback], Optional[threading.Event], Exclusions], Node]
 # Anything that fills an empty folder node the way ``scanner.scan_into`` does (``demo.demo_rescan``).
-Rescanner = Callable[[Node, Optional[ProgressCallback], Optional[threading.Event]], Node]
+Rescanner = Callable[[Node, Optional[ProgressCallback], Optional[threading.Event], Exclusions], Node]
 # ``shutil.disk_usage`` or a stand-in: path -> object with ``total`` and ``free`` bytes.
 DiskUsage = Callable[[str], Any]
 
@@ -207,7 +207,12 @@ class UnhogApp:
         self.pad_scale_min = PAD_SCALING_CHOICES[DEFAULT_PAD_SCALING]
         self.history: list[Node] = []             # previous views, for Back
         self.modified_choice = DEFAULT_MODIFIED
-        self.hidden: dict[str, Node] = {}          # folders taken out of the display, by path
+        # Hidden folders: path -> (the detached node, the path of the folder it hung
+        # under). The scanner leaves them out; see ``hide_folder``.
+        self.hidden: dict[str, tuple[Node, str]] = {}
+        self.exclusions = Exclusions()             # shared with the running scan
+        self.rescan_queue: list[Node] = []         # folders to scan again, one scan at a time
+        self.tree_changed = False                  # the scan thread altered the tree for the UI
 
     # -- setup ---------------------------------------------------------------
 
@@ -375,6 +380,12 @@ class UnhogApp:
         if jobs:
             dpg.run_callbacks(jobs)
         self._drain_messages()
+        if self.tree_changed:  # a hidden folder was taken out (or put back) by the scan thread
+            self.tree_changed = False
+            self._refresh_view()
+            self._update_status()
+        if not self.scanning and self.rescan_queue:
+            self.rescan_folder(self.rescan_queue.pop(0))
         self._track_size()
         self._live_redraw()
         self._update_hover()
@@ -458,35 +469,11 @@ class UnhogApp:
 
     def _end_scan(self) -> None:
         self.scanning = False
+        self.exclusions.run_pending()  # work the scan thread did not get to before it ended
         if self.rescan_parent is not None:
             refresh_upwards(self.rescan_parent)  # child order, newest file, pinned
             self.rescan_parent = self.rescan_node = None
-            self._relink_hidden()
         self._update_progress()
-
-    def _relink_hidden(self) -> None:
-        """After a rescan, point hidden entries at the fresh nodes of the same path.
-
-        The rescan replaced a subtree with new nodes, so a hidden folder inside
-        it is now an orphan with stale numbers. Its path stays hidden (the
-        filter works by path); the node is only needed for the Unhide button's
-        size, so look it up again and drop entries that no longer exist.
-        """
-        if self.tree is None or not self.hidden:
-            return
-        stale = {path for path, node in self.hidden.items() if node.ancestors()[0] is not self.tree}
-        if not stale:
-            return
-        stack = [self.tree]
-        while stack and stale:
-            node = stack.pop()
-            if node.is_dir:
-                if node.path in stale:
-                    self.hidden[node.path] = node
-                    stale.discard(node.path)
-                stack.extend(node.children)
-        for path in stale:
-            del self.hidden[path]
 
     def _update_progress(self) -> None:
         """Show scan progress: bytes for a whole drive, finished folders otherwise.
@@ -530,17 +517,20 @@ class UnhogApp:
         self.free_node = None
         self.rescan_parent = None
         self.hidden = {}
+        self.exclusions = Exclusions()  # a fresh one: the old scan thread may still hold the last
+        self.rescan_queue = []
         self._update_unhide_button()
         self.set_view(None)
         dpg.set_value(self.path_input, path)
         cancel = self._begin_scan(f"Scanning {path} ...")
+        exclusions = self.exclusions
 
         def worker():
             try:
                 self.msgs.put(("disk", cancel, self.disk_usage(path)))
             except OSError:
                 pass
-            self._run_scan(lambda progress: self.scanner(path, progress, cancel), cancel)
+            self._run_scan(lambda progress: self.scanner(path, progress, cancel, exclusions), cancel)
 
         self._launch(worker)
 
@@ -551,18 +541,25 @@ class UnhogApp:
         empty node is attached in its place and filled by the scan, so the
         treemap shows the folder filling in live and the totals stay right.
         """
-        if folder is self.tree or folder.parent is None:
+        if folder is self.tree:
             self.start_scan(self.root_path)
+            return
+        if folder.parent is None:
+            return  # no longer in the tree (hidden, or replaced by an earlier rescan)
+        if self.scanning:
+            self.rescan_queue.append(folder)  # one scan at a time: ``frame`` starts it afterwards
             return
         self._stop_scan()
         parent = detach(folder)
-        fresh = Node(folder.name, folder.path, True, parent=parent, local=False)
+        fresh = Node(folder.name, folder.path, True, parent=parent, local=False, scanned=False)
         parent.children.append(fresh)
         self._redirect_views(folder, fresh)
         self.rescan_parent = parent
         self.rescan_node = fresh
         cancel = self._begin_scan(f"Rescanning {folder.path} ...")
-        self._launch(lambda: self._run_scan(lambda progress: self.rescanner(fresh, progress, cancel), cancel))
+        exclusions = self.exclusions
+        self._launch(lambda: self._run_scan(
+            lambda progress: self.rescanner(fresh, progress, cancel, exclusions), cancel))
         self._refresh_view()
 
     def _redirect_views(self, old: Node, new: Node) -> None:
@@ -624,40 +621,99 @@ class UnhogApp:
                         f"{self._drive()}.")
         if self.hidden:
             n = len(self.hidden)
-            summary += f" {n} folder{'s' if n != 1 else ''} hidden ({format_size(self._hidden_size())})."
+            summary += f" {n} folder{'s' if n != 1 else ''} hidden ({self._hidden_size()})."
         self._update_unhide_button()
         dpg.set_value(self.status, summary + " Double-click a folder to zoom in, "
                                    "double-click background to zoom out, right-click for options.")
 
     # -- hidden folders ------------------------------------------------------
 
-    def _hidden_size(self) -> int:
-        """Bytes the hidden folders hold, in the units the treemap is drawn in."""
-        return sum(n.size if self.local_only else n.total_size for n in self.hidden.values())
+    def _hidden_size(self) -> str:
+        """The hidden folders' bytes, in the units the treemap is drawn in; "+" marks
+        a total that is only a lower bound because a folder was hidden mid-scan."""
+        nodes = [node for node, _ in self.hidden.values()]
+        total = sum(n.size if self.local_only else n.total_size for n in nodes)
+        return format_size(total) + ("" if all(n.scanned for n in nodes) else "+")
 
     def _update_unhide_button(self) -> None:
         n = len(self.hidden)
         if n:
-            label = f"Unhide {n} folder{'s' if n != 1 else ''} ({format_size(self._hidden_size())})"
+            label = f"Unhide {n} folder{'s' if n != 1 else ''} ({self._hidden_size()})"
             dpg.configure_item(self.unhide_button, label=label, show=True)
         else:
             dpg.configure_item(self.unhide_button, show=False)
         dpg.configure_item(self.unhide_spacer, show=bool(n))
 
+    def _run_on_tree(self, work: Callable[[], None]) -> None:
+        """Change the tree: now if no scan runs, else on the scan thread at its next folder."""
+        if self.scanning:
+            def on_scan_thread() -> None:
+                work()
+                self.tree_changed = True  # ``frame`` redraws
+            self.exclusions.defer(on_scan_thread)
+        else:
+            work()
+
     def hide_folder(self, folder: Node) -> None:
-        """Take ``folder`` out of the treemap and the totals until Unhide is pressed."""
+        """Take ``folder`` out of the treemap, the totals and the scan until Unhide is pressed.
+
+        The folder is detached from the tree (on the scan thread if a scan is
+        running, which then also stops scanning inside it and skips it in
+        later rescans) and remembered with the path of its parent, so that
+        Unhide can hang it back where it was.
+        """
         if not folder.is_dir or folder.aggregate or folder is self.tree or folder.parent is None:
             return
-        self.hidden[folder.path] = folder
-        if self.view is not None and folder in self.view.ancestors():
-            self.set_view(folder.parent)  # the view was inside the hidden folder
+        parent = folder.parent
+        self.hidden[folder.path] = (folder, parent.path)
+        self._redirect_views(folder, parent)  # the view and the Back history leave the folder
+        self.exclusions.add(folder.path)
+
+        def take_out() -> None:
+            if folder.parent is not None:  # the scan may already have detached it itself
+                detach(folder)
+
+        self._run_on_tree(take_out)
         self._refresh_view()
         self._update_status()
 
     def unhide_all(self) -> None:
+        """Hang every hidden folder back into the tree; scan again those hidden mid-scan."""
+        hidden = sorted(self.hidden.values(), key=lambda h: len(h[0].path))  # parents first
         self.hidden = {}
+        for node, _ in hidden:
+            self.exclusions.remove(node.path)
+
+        def put_back() -> None:
+            found = self._find_folders({parent_path for _, parent_path in hidden})
+            for node, parent_path in hidden:
+                parent = found.get(parent_path)
+                if parent is None or self.tree is None:
+                    # Its place is gone (the parent was replaced by a rescan that has
+                    # not reached it yet, or dropped): start over with the whole folder.
+                    self.rescan_queue.append(self.tree)
+                    return
+                attach(node, parent)
+                refresh_upwards(parent)
+                found[node.path] = node  # a hidden folder's parent may itself be one
+                if not node.scanned:
+                    self.rescan_queue.append(node)
+
+        self._run_on_tree(put_back)
         self._refresh_view()
         self._update_status()
+
+    def _find_folders(self, paths: set[str]) -> dict[str, Node]:
+        """The folders in the tree whose paths are in ``paths``, by path."""
+        found: dict[str, Node] = {}
+        stack = [self.tree] if self.tree is not None else []
+        while stack and len(found) < len(paths):
+            node = stack.pop()
+            if node.is_dir:
+                if node.path in paths:
+                    found[node.path] = node
+                stack.extend(node.children)
+        return found
 
     def _on_unhide(self) -> None:
         self.unhide_all()
@@ -708,21 +764,17 @@ class UnhogApp:
         if self.tree is None:
             return
         rule = MODIFIED_CHOICES.get(self.modified_choice)
-        hidden = set(self.hidden)
-        if rule is None and not hidden:
+        if rule is None:
             if self.tree_filtered:  # resetting is a pass over the whole tree: only when needed
                 apply_filter(self.tree, None)
                 self.tree_filtered = False
             return
-        if rule is None:
-            apply_filter(self.tree, None, hidden)
+        mode, age = rule
+        cutoff = time.time() - age
+        if mode == "older":
+            apply_filter(self.tree, lambda n: n.mtime < cutoff)
         else:
-            mode, age = rule
-            cutoff = time.time() - age
-            if mode == "older":
-                apply_filter(self.tree, lambda n: n.mtime < cutoff, hidden)
-            else:
-                apply_filter(self.tree, lambda n: n.mtime >= cutoff, hidden)
+            apply_filter(self.tree, lambda n: n.mtime >= cutoff)
         self.tree_filtered = True
 
     def _on_modified(self, sender, app_data) -> None:

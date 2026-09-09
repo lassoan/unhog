@@ -7,10 +7,12 @@ from unhog.scanner import (
     FILE_ATTRIBUTE_PINNED,
     FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
     FILE_ATTRIBUTE_UNPINNED,
+    Exclusions,
     Node,
     ScanCancelled,
     TreeBuilder,
     apply_filter,
+    attach,
     default_root,
     detach,
     refresh_upwards,
@@ -114,6 +116,73 @@ class ScanTests(unittest.TestCase):
         self.assertEqual([c.name for c in tree.children], ["sub", "big.bin"])
         self.assertEqual(tree.mtime, max(c.mtime for c in tree.children))
         self.assertTrue(tree.local)
+
+    def test_attach_reverses_detach(self):
+        tree = scan(self.root)
+        sub = next(c for c in tree.children if c.name == "sub")
+        before = (tree.size, tree.total_size, tree.file_count, tree.total_files, tree.mtime)
+        parent = detach(sub)
+        self.assertEqual((tree.size, tree.total_files), (1000, 2))
+        attach(sub, parent)
+        refresh_upwards(parent)
+        self.assertIs(sub.parent, tree)
+        self.assertIn(sub, tree.children)
+        self.assertEqual((tree.size, tree.total_size, tree.file_count, tree.total_files, tree.mtime), before)
+        self.assertEqual([c.name for c in tree.children], ["big.bin", "sub"])
+
+    def test_excluded_folder_is_skipped(self):
+        excl = Exclusions()
+        excl.add(os.path.join(self.root, "sub"))
+        tree = scan(self.root, exclusions=excl)
+        self.assertEqual([c.name for c in tree.children], ["big.bin"])
+        self.assertEqual((tree.size, tree.file_count, tree.total_files), (1000, 1, 2))
+        self.assertTrue(tree.scanned)
+
+    def test_folder_holding_only_an_excluded_folder_is_kept(self):
+        # "sub" would be empty without "deep" and is normally dropped; keep it so
+        # that "deep" has a place to return to when it is unhidden.
+        os.remove(os.path.join(self.root, "sub", "a.txt"))
+        excl = Exclusions()
+        excl.add(os.path.join(self.root, "sub", "deep"))
+        tree = scan(self.root, exclusions=excl)
+        sub = next(c for c in tree.children if c.name == "sub")
+        self.assertEqual((sub.total_size, sub.children), (0, []))
+        self.assertTrue(sub.scanned)
+        self.assertEqual(tree.size, 1000)
+
+    def test_exclusion_added_mid_scan_abandons_the_folder(self):
+        # root/a/{a1, a2}, root/b. Exclude "a" once the scan is inside it: the rest
+        # of "a" is not read, "a" leaves the tree with its numbers, "b" is scanned.
+        for name in ("a1", "a2"):
+            write(os.path.join(self.root, "a", name, "f.bin"), 100)
+        write(os.path.join(self.root, "b", "g.bin"), 10)
+        write(os.path.join(self.root, "a", "top.bin"), 7)
+        excl = Exclusions()
+        seen = []
+        root_holder = []
+
+        def hide_a_when_inside():  # runs on the scan thread at each folder; re-queues until then
+            root = root_holder[0]
+            a = next((c for c in root.children if c.name == "a"), None)
+            if a is not None and any(c.is_dir for c in a.children):
+                excl.add(a.path)
+                seen.append(a)
+            else:
+                excl.defer(hide_a_when_inside)
+
+        excl.defer(hide_a_when_inside)
+        root = Node(os.path.basename(self.root), self.root, True, local=False)
+        root_holder.append(root)
+        tree = scan_into(root, exclusions=excl)
+        self.assertIs(tree, root)
+        a = seen[0]
+        self.assertIsNone(a.parent)  # detached by the scan thread
+        self.assertFalse(a.scanned)  # abandoned part-way: not complete
+        self.assertTrue(tree.scanned)
+        self.assertLess(a.total_files, 3)  # top.bin (and at most the first subfolder's file)
+        # The tree holds everything except "a", and its totals never included "a"'s files.
+        self.assertEqual(sorted(c.name for c in tree.children), ["b", "big.bin", "sub"])
+        self.assertEqual((tree.size, tree.file_count), (1510, 4))
 
     def test_missing_root(self):
         tree = scan(os.path.join(self.root, "does_not_exist"))
@@ -270,19 +339,6 @@ class FilterTests(unittest.TestCase):
         # Raw numbers never change.
         self.assertEqual((root.size, root.total_size), (170, 177))
 
-        # Hidden folders count as empty, with or without a file filter.
-        apply_filter(root, None, {sub.path})
-        self.assertEqual((sub.view_size, sub.view_total_size, sub.view_file_count, sub.view_total_files), (0, 0, 0, 0))
-        self.assertEqual((root.view_size, root.view_total_size, root.view_file_count, root.view_total_files), (40, 47, 1, 2))
-        self.assertEqual((old.view_size, new.view_size), (100, 30))  # the contents keep their numbers
-        apply_filter(root, lambda n: n.mtime < 3000, {sub.path})
-        self.assertEqual((root.view_size, root.view_total_files), (40, 1))  # only "stale" is left
-        apply_filter(root, lambda n: n.mtime < 3000, {sub.path, stale.path})
-        self.assertEqual((root.view_size, root.view_total_files), (0, 0))
-        apply_filter(root, None, set())  # an empty hidden set is the same as none
-        self.assertEqual(root.fsize, -1)
-        self.assertEqual((root.view_size, root.view_total_files), (170, 4))
-        self.assertEqual((root.size, root.total_size), (170, 177))
 
     def test_scan_records_mtime(self):
         with tempfile.TemporaryDirectory() as tmp:
