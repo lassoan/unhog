@@ -11,6 +11,7 @@ from unhog.scanner import (
     ScanCancelled,
     TreeBuilder,
     apply_filter,
+    default_root,
     detach,
     refresh_upwards,
     scan_into,
@@ -285,6 +286,32 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(format_size(1024), "1.0 KB")
         self.assertEqual(format_size(1536 * 1024), "1.5 MB")
         self.assertEqual(format_size(3 * 1024 ** 3), "3.0 GB")
+
+
+class DefaultRootTests(unittest.TestCase):
+    def test_default_root(self):
+        root = default_root()
+        self.assertTrue(os.path.isabs(root))
+        if os.name == "nt":
+            self.assertTrue(root.lower().endswith("onedrive") or os.path.isdir(root))
+        else:
+            self.assertTrue(os.path.isdir(root))
+            home = os.path.expanduser("~")
+            self.assertEqual(root, home if os.path.isdir(home) else os.path.abspath(os.sep))
+
+    def test_default_root_without_home_falls_back_to_root(self):
+        if os.name == "nt":
+            self.skipTest("Windows always defaults to the OneDrive folder")
+        old = {k: os.environ.get(k) for k in ("HOME",)}
+        os.environ["HOME"] = "/nonexistent-unhog-home"
+        try:
+            self.assertEqual(default_root(), os.path.abspath(os.sep))
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ PyPI package provides).
 ## Run from source
 
 ```
-python -m unhog            # scans %OneDrive%
+python -m unhog            # scans %OneDrive% (the home folder on other platforms)
 python -m unhog D:\Other   # scans another folder
 ```
 

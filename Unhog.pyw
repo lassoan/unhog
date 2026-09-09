@@ -1,4 +1,4 @@
-"""Double-click launcher (no console window). Scans %OneDrive% by default."""
+"""Double-click launcher (no console window). Scans %OneDrive% by default (the home folder on other platforms)."""
 
 import os
 import sys

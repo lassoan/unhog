@@ -109,11 +109,21 @@ class ScanCancelled(Exception):
 
 
 def default_root() -> str:
+    """Folder scanned when none is given.
+
+    On Windows this is the OneDrive folder (from the environment variables
+    OneDrive sets, else ``~/OneDrive``). Elsewhere there is no OneDrive
+    placeholder attribute to look for, so the home folder is scanned, or the
+    file system root if the home folder does not exist.
+    """
+    home = os.path.expanduser("~")
+    if os.name != "nt":
+        return home if os.path.isdir(home) else os.path.abspath(os.sep)
     for var in ("OneDrive", "OneDriveCommercial", "OneDriveConsumer"):
         value = os.environ.get(var)
         if value and os.path.isdir(value):
             return value
-    return os.path.join(os.path.expanduser("~"), "OneDrive")
+    return os.path.join(home, "OneDrive")
 
 
 class TreeBuilder:
