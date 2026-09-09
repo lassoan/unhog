@@ -5,7 +5,8 @@ source, testing, building the standalone exe and publishing releases.
 
 ## Requirements
 
-- Windows, Python 3.9+
+- Python 3.9+ on Windows, Linux or macOS (Apple Silicon). Detecting online-only
+  files needs Windows; elsewhere the app is a plain disk-usage treemap.
 - `pip install -r requirements.txt` (only dependency: [Dear PyGui](https://github.com/hoffstadt/DearPyGui))
 
 Alternatively `pip install -e .` installs the checkout as an editable package,

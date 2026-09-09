@@ -14,7 +14,13 @@ be explored right away, with a progress bar showing how far the scan has got.
 Optionally the free space on the drive is drawn next to the folder, on the
 same scale, to show how much the local copies matter.
 
-## Download
+Unhog runs on Windows, Linux and macOS. Telling online-only placeholders from
+downloaded files relies on a Windows file attribute, so that part works on
+Windows only; on Linux and macOS every file counts as local and Unhog is a
+plain, fast disk-usage treemap for any folder. Windows users can download a
+ready-to-run zip; on every platform it can be installed with pip.
+
+## Download (Windows)
 
 **[Download Unhog.zip (latest release)](https://github.com/lassoan/unhog/releases/latest/download/Unhog.zip)**
 
@@ -31,7 +37,7 @@ SmartScreen may show "Windows protected your PC". Click **More info**, then
 Security, *Protection history*, find the entry and choose *Restore* or
 *Allow*.
 
-## Run
+## Run (Windows)
 
 Unzip `Unhog.zip` anywhere, for example into your Documents or
 Downloads folder. This creates a folder named `Unhog`. Open it and double-click
@@ -48,20 +54,62 @@ command prompt with the folder as argument:
 Unhog.exe D:\Other
 ```
 
-## Install with pip
+## Install with pip (Windows, Linux, macOS)
 
-If Python 3.9 or later is installed, Unhog can also be installed from
-[PyPI](https://pypi.org/project/unhog/) instead of downloading the zip:
+Unhog is on [PyPI](https://pypi.org/project/unhog/) and needs Python 3.9 or
+later. The only dependency, Dear PyGui, has prebuilt packages for 64-bit
+Windows, Linux (x86-64 and ARM64) and Apple Silicon Macs, so no compiler is
+needed. The simplest way, if [pipx](https://pipx.pypa.io/) is installed, is
+the same everywhere:
 
 ```
-pip install unhog
+pipx install unhog
 unhog
 ```
 
-or, to keep it in its own environment, `pipx install unhog`. The `unhog`
-command takes the same optional folder argument as the exe. Windows Defender
-and SmartScreen have nothing to say about this route, since no unsigned exe is
-involved.
+Or with a plain virtual environment:
+
+**Windows**
+
+```
+py -m venv %LOCALAPPDATA%\unhog
+%LOCALAPPDATA%\unhog\Scripts\pip install unhog
+%LOCALAPPDATA%\unhog\Scripts\unhog
+```
+
+Windows Defender and SmartScreen have nothing to say about this route, since
+no unsigned exe is involved.
+
+**Linux**
+
+```
+python3 -m venv ~/.local/share/unhog
+~/.local/share/unhog/bin/pip install unhog
+~/.local/share/unhog/bin/unhog
+```
+
+If `python3 -m venv` complains, install the venv package first (on Debian and
+Ubuntu, `sudo apt install python3-venv`). *Open in file manager* uses the
+desktop's file manager through D-Bus and works with GNOME Files, Dolphin,
+Nemo, Caja and Thunar.
+
+**macOS**
+
+```
+python3 -m venv ~/Library/unhog
+~/Library/unhog/bin/pip install unhog
+~/Library/unhog/bin/unhog
+```
+
+Use a Python from [python.org](https://www.python.org/downloads/macos/) or
+Homebrew (`brew install python`). Intel Macs are not supported, because Dear
+PyGui ships no package for them.
+
+On every platform the `unhog` command takes an optional folder to scan, for
+example `unhog ~/Pictures`; without one it scans your OneDrive folder on
+Windows and your home folder on Linux and macOS. `python -m unhog` works as
+well. To update later, run the same `pip install` with `--upgrade` (or
+`pipx upgrade unhog`).
 
 ## Freeing up space
 
@@ -72,6 +120,12 @@ right-click it and choose **Free up space**. The file stays in
 the cloud and is downloaded again when you open it. Back in Unhog, right-click
 the folder and choose *Rescan* to see the result without scanning everything
 again.
+
+On macOS the menu entry is *Open folder in Finder*, and OneDrive offers
+**Remove Download** in Finder's right-click menu; on Linux it is *Open folder
+in file manager*. On these platforms Unhog cannot tell which files are already
+online-only, so use it to find the big folders and check their state in the
+file manager.
 
 ## How to use
 
@@ -87,12 +141,14 @@ which are actually present on disk. It reads only the directory listing and
 never opens files, so scanning does not download anything.
 
 It is tested with OneDrive, OneDrive for Business (SharePoint), and Dropbox
-but it should be compatible with other cloud storage providers as well.
+but it should be compatible with other cloud storage providers as well. On
+Linux and macOS there is no such attribute, so every file counts as local and
+the treemap shows plain disk usage.
 
 ## Privacy
 
-Unhog runs entirely on your PC, does not connect to the internet, and does not
-send any information anywhere.
+Unhog runs entirely on your computer, does not connect to the internet, and
+does not send any information anywhere.
 
 ## For developers
 
