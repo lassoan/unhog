@@ -112,9 +112,9 @@ def default_root() -> str:
     """Folder scanned when none is given.
 
     On Windows this is the OneDrive folder (from the environment variables
-    OneDrive sets, else ``~/OneDrive``). Elsewhere there is no OneDrive
-    placeholder attribute to look for, so the home folder is scanned, or the
-    file system root if the home folder does not exist.
+    OneDrive sets, else ``~/OneDrive``). On Linux and macOS there is no
+    OneDrive placeholder attribute to look for, so the home folder is
+    scanned, or the file system root if the home folder does not exist.
     """
     home = os.path.expanduser("~")
     if os.name != "nt":
