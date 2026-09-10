@@ -1,0 +1,55 @@
+{
+    // Run and debug configurations for VS Code (Run > Start Debugging, F5).
+    // They use the interpreter selected for the workspace; "pip install -r
+    // requirements.txt" into it first (see DEVELOPMENT.md).
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Unhog",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "unhog",
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Unhog (demo)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "unhog",
+            "args": ["--demo"],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Unhog (folder...)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "unhog",
+            "args": ["${input:folder}"],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Unhog tests",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "unittest",
+            "args": ["discover", "-s", "tests", "-v"],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        }
+    ],
+    "inputs": [
+        {
+            "id": "folder",
+            "type": "promptString",
+            "description": "Folder to scan, e.g. D:\\Other"
+        }
+    ]
+}
