@@ -13,16 +13,19 @@ treemap can be watched filling in; ``demo_disk_usage`` stands in for
 from __future__ import annotations
 
 import datetime
+import os
 import random
 import threading
 import time
 from collections import namedtuple
 from typing import Callable, Optional, Sequence
 
-from .scanner import Exclusions, Node, ProgressCallback, TreeBuilder
+from .freeup import FreeUpEvent, FreeUpReport
+from .scanner import Exclusions, Node, ProgressCallback, TreeBuilder, _walk
 
 DEMO_ROOT = r"C:\Users\Sam\OneDrive"
 DEMO_SCAN_SECONDS = 8.0  # how long the replayed demo scan takes
+DEMO_FREE_SECONDS = 6.0  # how long the pretend "Free up space" takes to unload the files
 
 KB = 1024
 MB = 1024 * KB
@@ -65,6 +68,16 @@ def _finalize(node: Node, path: str) -> None:
     node.path = path
     if not node.is_dir:
         return
+    # The random names can repeat within a folder; on a disk they cannot, and
+    # paths are looked up by name (rescans, Free up space), so number repeats.
+    names: set[str] = set()
+    for child in node.children:
+        stem, ext = (child.name, "") if child.is_dir else os.path.splitext(child.name)
+        n = 1
+        while child.name in names:
+            n += 1
+            child.name = f"{stem} ({n}){ext}"
+        names.add(child.name)
     kept: list[Node] = []
     for child in node.children:
         child.parent = node
@@ -386,6 +399,33 @@ def demo_rescan(node: Node, progress_cb: Optional[ProgressCallback] = None,
     else:
         builder.enter_dir(node, 0)
     return builder.finish()
+
+
+def demo_free_up(node: Node, report: FreeUpReport, cancel: threading.Event,
+                 duration: float = DEMO_FREE_SECONDS) -> None:
+    """Stand-in for ``freeup.free_up_space`` on a node of the demo tree.
+
+    Nothing on disk is touched: the local files under ``node`` are "marked"
+    at once and then reported unloaded in batches, in a shuffled order,
+    spread over ``duration`` seconds, so the treemap can be watched emptying
+    the way it does when OneDrive unloads real files. Reports the same
+    events as the real thing.
+    """
+    files = [n for n in _walk(node) if not n.is_dir]
+    paths = [n.path for n in files if n.local]
+    report(FreeUpEvent("marked", len(files), 0, len(paths)))
+    random.Random(len(paths)).shuffle(paths)
+    batch = max(1, len(paths) // 20)
+    pacer = _Pacer((len(paths) + batch - 1) // batch, duration)
+    remaining = len(paths)
+    for start in range(0, len(paths), batch):
+        if cancel.is_set():
+            break
+        pacer.wait()
+        chunk = paths[start:start + batch]
+        report(FreeUpEvent("unloaded", paths=chunk))
+        remaining -= len(chunk)
+    report(FreeUpEvent("done", len(files), 0, remaining))
 
 
 DiskUsage = namedtuple("DiskUsage", "total used free")  # same fields as shutil.disk_usage

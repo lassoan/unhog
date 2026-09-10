@@ -113,12 +113,21 @@ well. To update later, run the same `pip install` with `--upgrade` (or
 
 ## Freeing up space
 
-Unhog only shows where the space goes; it does not delete or change anything.
 To free the space a file or folder uses, right-click it in Unhog and choose
+**Free up space**. It marks the file, or everything in the folder, to be kept
+online-only, exactly as the command of the same name in Explorer does:
+nothing is deleted, the files stay in the cloud and are downloaded again when
+you open them. As OneDrive unloads the files Unhog takes them out of the
+treemap, so you can watch the folder shrink. This is the only thing Unhog
+does that changes anything on disk; unchecking **Enable modifications** in
+**Settings...** removes the command from the menu, and Unhog then only shows
+where the space goes. See [USAGE.md](https://github.com/lassoan/unhog/blob/main/USAGE.md)
+for the details.
+
+The same can be done in Explorer: right-click the item in Unhog and choose
 *Open folder in Explorer* (the item is selected there), then in Explorer
-right-click it and choose **Free up space**. The file stays in
-the cloud and is downloaded again when you open it. Back in Unhog, right-click
-the folder and choose *Rescan* to see the result without scanning everything
+right-click it and choose **Free up space**. Back in Unhog, right-click the
+folder and choose *Rescan* to see the result without scanning everything
 again.
 
 On macOS the menu entry is *Open folder in Finder*, and OneDrive offers

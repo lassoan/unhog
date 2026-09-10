@@ -22,6 +22,12 @@ python -m unhog D:\Other   # scans another folder
 
 or double-click `Unhog.pyw`.
 
+In VS Code, `.vscode/launch.json` provides run and debug configurations
+(Run > Start Debugging, or F5): **Unhog** scans the default folder, **Unhog
+(demo)** starts demo mode (see below), **Unhog (folder...)** asks for a
+folder to scan, and **Unhog tests** runs the unit tests under the debugger.
+They use the interpreter selected for the workspace.
+
 ## Demo mode
 
 ```
@@ -51,6 +57,8 @@ for the free-space tile.
   as soon as the folder is listed and reports the growing tree to a progress
   callback, so the app can draw the treemap while the scan is still running.
 - `unhog/treemap.py` lays out the squarified treemap and does hit testing.
+- `unhog/freeup.py` implements "Free up space": marks files online-only the
+  way Explorer does and watches the sync client unload them.
 - `unhog/app.py` is the Dear PyGui user interface.
 - `unhog/win_dialogs.py` wraps the native Windows folder picker via ctypes.
 - `unhog/demo.py` generates the made-up folder tree for demo mode and screenshots.
@@ -130,6 +138,44 @@ at the start of every frame, so button, combo and mouse handlers execute on
 the UI thread and can never rebuild the drawlist while a live redraw is in
 progress. Mouse moves only set a flag; the hover tooltip is redrawn once per
 frame.
+
+## Free up space
+
+Explorer's *Free up space* deletes nothing: it sets the Win32 attribute
+`FILE_ATTRIBUTE_UNPINNED` (and clears `FILE_ATTRIBUTE_PINNED`, "Always keep
+on this device") on the item and everything inside it. Both attributes belong
+to the Windows Cloud Files API behind Files On-Demand (Windows 10 1709+), not
+to any one sync client; the client (OneDrive, and current Dropbox, Google
+Drive, iCloud and Box clients, which all use that API) notices and, once a
+file's contents are safely in the cloud, replaces the local copy with an
+online-only placeholder in its own time. `freeup.free_up_space` sets the same
+attributes, which is also what `attrib +U -P /S /D` does. It reads them from
+the directory listing and writes them with `SetFileAttributes`, so no file is
+opened and nothing is downloaded; symlinks and junctions are not followed,
+as when scanning. The command is offered while *Enable modifications* is
+checked in Settings (on by default; unchecking it makes Unhog read-only); on
+other platforms the setting is left out (`UnhogApp.freer` is None).
+
+The app runs `free_up_space` on a worker thread (one per command, a
+`FreeUpJob` in `free_jobs`). After marking, the worker keeps watching the
+files that were on local storage, grouped by folder: it lists each folder
+again (never opening files) and reports the paths of those that now carry
+`FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS`, or are gone, in batches. It looks
+again after a second, doubling the interval up to ten seconds while nothing
+changes, and gives up after half an hour without a change (the client may be
+paused, or a file may have changes still to upload); the "done" report says
+how many files were still local. Reports go through the app's message queue
+like scan messages, with the job as the token, so leftovers from a job that
+a new scan cancelled are ignored. On the UI thread `_file_nodes` maps the
+paths to file nodes with a per-job path index over the item's subtree
+(`scanner.find_node` locates the item; the index is rebuilt once per batch
+when a path is missing from it or its node was replaced by a rescan since),
+and `scanner.unload` turns each node online-only in place, taking its bytes
+out of every folder above, through `_run_on_tree`, so that a running scan
+thread applies the change rather than the UI thread. A path with no node is
+skipped: it is an empty file, or one the scan has not reached yet and will
+list as online-only. The demo uses `demo_free_up`, which reports the local
+files under the node unloaded in shuffled batches over a few seconds.
 
 ## Display scaling
 

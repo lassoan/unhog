@@ -509,6 +509,44 @@ def attach(node: Node, parent: Node) -> None:
     parent.children.append(node)
 
 
+def unload(node: Node) -> int:
+    """Record that file ``node`` has left local storage (it became an online-only
+    placeholder): its local bytes leave it and every folder above. Returns the
+    bytes freed. A file that was online-only already is left alone. The file
+    can no longer be pinned, so no folder above is all-pinned either."""
+    if node.is_dir or not node.local:
+        return 0
+    size, count = node.size, node.file_count
+    node.size = node.file_count = 0
+    node.local = node.pinned = False
+    anc: Optional[Node] = node.parent
+    while anc is not None:
+        anc.size -= size
+        anc.file_count -= count
+        anc.local = anc.size > 0
+        anc.pinned = False
+        anc = anc.parent
+    return size
+
+
+def find_node(root: Node, path: str) -> Optional[Node]:
+    """The node at ``path`` in the tree under ``root``, or None.
+
+    Follows the folder whose path is a prefix of ``path`` at each level, so
+    the cost is the depth of the path times the width of the folders on the
+    way, not the size of the tree.
+    """
+    node = root
+    while node.path != path:
+        prefix = node.path.rstrip("\\/") + os.sep
+        if not path.startswith(prefix):
+            return None
+        node = next((c for c in node.children if path == c.path or path.startswith(c.path + os.sep)), None)
+        if node is None:
+            return None
+    return node
+
+
 def refresh_upwards(folder: Node) -> None:
     """Recompute what ``finish_dir`` derives (child order, newest file, pinned)
     for ``folder`` and every folder above it, after a subtree was replaced."""

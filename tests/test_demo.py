@@ -42,6 +42,11 @@ class DemoTreeTests(unittest.TestCase):
                 self.assertIs(child.parent, node)
                 self.assertEqual(child.path, node.path + "\\" + child.name)
 
+    def test_paths_are_unique(self):
+        # As on a real disk: rescans and Free up space find nodes by path.
+        paths = [n.path for n in walk(self.tree)]
+        self.assertEqual(len(paths), len(set(paths)))
+
     def test_files_are_consistent(self):
         files = [n for n in walk(self.tree) if not n.is_dir]
         self.assertGreater(len(files), 1000)

@@ -25,8 +25,10 @@ bar is an estimate from the folders found but not yet finished.
   (the Windows Properties dialog); and *Rescan*, which reads just that folder
   (for a file, its folder) again and updates the treemap in place, handy after
   freeing space in Explorer; and *Hide*, which takes that folder out of the
-  treemap (see below). Entries that do not apply are left out. **Escape**
-  closes the menu (and the Settings window).
+  treemap (see below); and, for files and folders that use local storage,
+  **Free up space** (see below; **Enable modifications** in Settings turns it
+  off). Entries that do not apply are left out. **Escape** closes the menu
+  (and the Settings window).
 - **Hide** (right-click menu, folders only) removes a folder from the display,
   as if it were not there: the folders above it shrink accordingly, so the
   rest of the treemap gets the space and the remaining items can be compared
@@ -43,6 +45,23 @@ bar is an estimate from the folders found but not yet finished.
   button shows its size with a "+", and **Unhide** scans it properly when it
   brings it back. Nothing is changed on disk, and a new scan (**Browse...**,
   the folder box or the **Rescan** button) starts with nothing hidden.
+- **Free up space** (right-click menu, Windows only) does what the command of
+  the same name does in Explorer's right-click menu: it marks the file, or the folder
+  and everything in it, to be kept online-only. Nothing is deleted. The sync
+  client (OneDrive, or any other that uses Windows Files On-Demand) then
+  removes the local copies in its own time, usually within seconds, and
+  downloads a file again the moment it is opened. Unhog keeps watching the
+  marked files and takes each one out of the treemap as soon as it has been
+  unloaded, so the folder shrinks while the sync client works; the folder's
+  title says "freeing up space..." meanwhile and the status line counts the
+  files unloaded so far. When it is over, the status line reports how many
+  files and how much space were unloaded, and, if the sync client did not
+  unload some of them (it may be paused, or a file may still have changes to
+  upload), how many are left; a right-click *Rescan* later shows their
+  state. Files marked "Always keep on this device" lose that mark, as in
+  Explorer. Hiding, rescanning and zooming are all fine while this runs; a
+  new scan (**Browse...**, the folder box or the **Rescan** button) stops the
+  watching, and the scan shows the current state.
 - On macOS the two Explorer entries read *Open in Finder* and *Open folder in
   Finder*; on Linux, *Open in file manager* and *Open folder in file manager*.
   Linux desktops are asked to show the folder through the standard
@@ -95,6 +114,13 @@ open it in your browser):
   compares with what is left on the disk.
   The tile appears only in the top-level view. Hover it for the exact numbers;
   the status line shows them too.
+- **Enable modifications** (on by default, Windows only) offers **Free up
+  space** in the right-click menu of files and folders that use local
+  storage. Everything else Unhog does only reads the disk; this is the one
+  command that changes something, and unchecking the setting takes it out of
+  the menu, for example on a shared machine or when just looking around. It
+  sets the same "keep online-only" mark that Explorer's *Free up space* sets
+  and deletes nothing; see the description of the command above.
 
 Files are colored by type (video, image, audio, document, archive, code, disk
 image, other) and shaded darker the deeper they sit.

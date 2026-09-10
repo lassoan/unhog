@@ -19,8 +19,10 @@ from urllib.parse import quote
 import dearpygui.dearpygui as dpg
 
 from . import __version__
+from .freeup import FreeUpEvent, FreeUpReport, free_up_space
 from .scanner import (Exclusions, Node, ProgressCallback, ScanCancelled, apply_filter, attach,
-                      default_root, detach, format_size, refresh_upwards, scan, scan_into)
+                      default_root, detach, find_node, format_size, refresh_upwards, scan, scan_into,
+                      unload)
 from .treemap import Item, hit_test, layout, local_size, open_aggregate, total_size
 from .win_dialogs import pick_folder, show_properties, ui_scale
 
@@ -167,15 +169,51 @@ Scanner = Callable[[str, Optional[ProgressCallback], Optional[threading.Event], 
 Rescanner = Callable[[Node, Optional[ProgressCallback], Optional[threading.Event], Exclusions], Node]
 # ``shutil.disk_usage`` or a stand-in: path -> object with ``total`` and ``free`` bytes.
 DiskUsage = Callable[[str], Any]
+# Anything that frees up the space of a node's file or folder the way
+# ``freeup.free_up_space`` does, reporting as it goes (see also ``demo.demo_free_up``).
+FreeUp = Callable[[Node, FreeUpReport, threading.Event], None]
+
+
+def free_up_node(node: Node, report: FreeUpReport, cancel: threading.Event) -> None:
+    free_up_space(node.path, report, cancel)
+
+
+# Only Windows has the attributes Explorer's "Free up space" sets; elsewhere the
+# command (and the setting that enables it) is left out.
+DEFAULT_FREER: Optional[FreeUp] = free_up_node if sys.platform == "win32" else None
+
+
+class FreeUpJob:
+    """One "Free up space" command as it runs: the file or folder, its worker's
+    cancel event and the running counts shown in the status line."""
+
+    def __init__(self, node: Node):
+        self.node = node
+        self.path = node.path
+        self.cancel = threading.Event()
+        self.phase = "marking"       # then "watching" (attributes set, files being unloaded)
+        self.files = 0               # files marked so far
+        self.failed = 0              # files and folders that could not be marked
+        self.watched = 0             # marked files that were on local storage
+        self.unloaded = 0            # of those, how many have left local storage
+        self.unloaded_bytes = 0
+        # File nodes under the job's node by path, built when the first
+        # unloaded files are reported and rebuilt when a path is not in it.
+        self.index: Optional[dict[str, Node]] = None
 
 
 class UnhogApp:
     def __init__(self, root_path: Optional[str] = None, scanner: Scanner = scan,
-                 disk_usage: DiskUsage = shutil.disk_usage, rescanner: Rescanner = scan_into):
+                 disk_usage: DiskUsage = shutil.disk_usage, rescanner: Rescanner = scan_into,
+                 freer: Optional[FreeUp] = DEFAULT_FREER):
         self.root_path = root_path or default_root()
         self.scanner = scanner
         self.rescanner = rescanner
         self.disk_usage = disk_usage
+        self.freer = freer                         # None: "Free up space" is not available
+        self.modifications = True                  # Settings: show commands that change things on disk
+        self.free_jobs: list[FreeUpJob] = []       # "Free up space" commands still running
+        self.notice = ""                           # outcome of the last one, shown in the status line
         self.rescan_parent: Optional[Node] = None  # set while one folder is being scanned again
         self.rescan_node: Optional[Node] = None    # the (initially empty) node that scan fills
         self.tree: Optional[Node] = None           # the tree being shown; grows while scanning
@@ -287,6 +325,15 @@ class UnhogApp:
                                                     default_value=self.show_free, callback=self._on_show_free)
             dpg.add_text("A hatched tile beside the folder, on the same scale.", color=TEXT_DIM)
             dpg.add_spacer(height=px(8))
+            if self.freer is not None:
+                dpg.add_checkbox(label="Enable modifications", default_value=self.modifications,
+                                 callback=self._on_modifications)
+                dpg.add_text("Adds Free up space to the right-click menu, which marks a file or\n"
+                             "folder to be kept online-only, as the same command in Explorer does.\n"
+                             "Nothing is deleted: the sync client (OneDrive, Dropbox, ...) removes\n"
+                             "the local copies, and downloads a file again when it is opened.",
+                             color=TEXT_DIM)
+                dpg.add_spacer(height=px(8))
             dpg.add_separator()
             dpg.add_spacer(height=px(4))
             dpg.add_text("About")
@@ -317,6 +364,9 @@ class UnhogApp:
             self.ctx_rescan = dpg.add_selectable(label="Rescan", callback=self._ctx_rescan)
             self.ctx_hide_sep = dpg.add_separator()
             self.ctx_hide = dpg.add_selectable(label="Hide", callback=self._ctx_hide)
+            # Only with "Enable modifications" (Settings): the one command that changes the disk.
+            self.ctx_free_sep = dpg.add_separator()
+            self.ctx_free = dpg.add_selectable(label="Free up space", callback=self._ctx_free)
 
         self.file_dialog = dpg.add_file_dialog(directory_selector=True, show=False, modal=True,
                                                width=px(760), height=px(460), callback=self._on_dir_chosen,
@@ -372,6 +422,7 @@ class UnhogApp:
         while dpg.is_dearpygui_running():
             self.frame()
         self.cancel.set()
+        self._cancel_free_jobs()
         dpg.destroy_context()
 
     def frame(self) -> None:
@@ -412,6 +463,10 @@ class UnhogApp:
             while True:
                 msg = self.msgs.get_nowait()
                 kind, token = msg[0], msg[1]
+                if kind == "free":  # from a "Free up space" worker; its job is the token
+                    if token in self.free_jobs:
+                        self._on_free_event(token, msg[2])
+                    continue
                 if token is not self.cancel:
                     continue
                 if kind == "progress":
@@ -421,7 +476,8 @@ class UnhogApp:
                     self._update_progress()
                     verb = "Scanning" if self.rescan_parent is None else "Rescanning"
                     dpg.set_value(self.status, f"{verb} {t.path} ... {t.total_files:,} files seen, "
-                                               f"{t.file_count:,} local ({format_size(t.size)}) so far.")
+                                               f"{t.file_count:,} local ({format_size(t.size)}) so far."
+                                               + self._free_summary())
                 elif kind == "done":
                     if self.rescan_parent is None:
                         self._adopt_tree(msg[2])
@@ -519,6 +575,8 @@ class UnhogApp:
         self.hidden = {}
         self.exclusions = Exclusions()  # a fresh one: the old scan thread may still hold the last
         self.rescan_queue = []
+        self._cancel_free_jobs()  # their nodes belong to the old tree; the new scan shows the truth
+        self.notice = ""
         self._update_unhide_button()
         self.set_view(None)
         dpg.set_value(self.path_input, path)
@@ -623,8 +681,165 @@ class UnhogApp:
             n = len(self.hidden)
             summary += f" {n} folder{'s' if n != 1 else ''} hidden ({self._hidden_size()})."
         self._update_unhide_button()
+        summary += self._free_summary()
+        if self.notice:
+            summary += " " + self.notice
         dpg.set_value(self.status, summary + " Double-click a folder to zoom in, "
                                    "double-click background to zoom out, right-click for options.")
+
+    # -- free up space -------------------------------------------------------
+
+    def _on_modifications(self, sender, app_data) -> None:
+        self.modifications = bool(app_data)
+
+    def _can_free(self, node: Node) -> bool:
+        """"Free up space" applies to a real file or folder that uses local storage."""
+        return (self.modifications and self.freer is not None and node is not self.free_node
+                and not node.aggregate and node.size > 0)
+
+    def free_up(self, node: Node) -> None:
+        """Run "Free up space" on ``node``'s file or folder and watch the files being unloaded.
+
+        The worker marks the item (see ``freeup``) and reports the files as
+        the sync client turns them online-only; ``_on_free_event`` takes the
+        bytes out of the treemap as the reports come in, so the folder shrinks
+        while OneDrive works. The job is dropped when a new scan starts.
+        """
+        if self.freer is None or not self._can_free(node):
+            return
+        job = FreeUpJob(node)
+        self.free_jobs.append(job)
+        self.notice = ""
+
+        def worker() -> None:
+            try:
+                self.freer(node, lambda event: self.msgs.put(("free", job, event)), job.cancel)
+            except Exception as exc:  # noqa: BLE001
+                self.msgs.put(("free", job, FreeUpEvent("error", paths=[str(exc)])))
+
+        threading.Thread(target=worker, name="free-up", daemon=True).start()
+        self._update_status()
+        self.redraw()  # the folder's title says what is going on
+
+    def _cancel_free_jobs(self) -> None:
+        for job in self.free_jobs:
+            job.cancel.set()
+        self.free_jobs = []
+
+    def _on_free_event(self, job: FreeUpJob, event: FreeUpEvent) -> None:
+        """Apply what a "Free up space" worker reported (on the UI thread)."""
+        if event.kind in ("marking", "marked"):
+            job.files, job.failed = event.files, event.failed
+            if event.kind == "marked":
+                job.phase = "watching"
+                job.watched = event.remaining
+                self._run_on_tree(lambda: self._clear_pinned(job.node))  # no longer "always keep"
+            self._update_status()
+            return
+        if event.kind == "unloaded":
+            nodes = self._file_nodes(job, event.paths)
+            job.unloaded += len(event.paths)
+            job.unloaded_bytes += sum(n.size for n in nodes if n.local)
+
+            def take_out() -> None:
+                for n in nodes:
+                    unload(n)
+
+            self._run_on_tree(take_out)
+            self._refresh_view()
+            self._update_status()
+            return
+        # "done" or "error": the job is over; say how it went until something else happens.
+        self.free_jobs.remove(job)
+        job.index = None
+        name = job.node.name
+        if event.kind == "error":
+            self.notice = f"Free up space failed for {name}: {event.paths[0] if event.paths else 'error'}."
+        else:
+            self.notice = (f"Freed up space in {name}: {job.unloaded:,} file{'s' if job.unloaded != 1 else ''} "
+                           f"({format_size(job.unloaded_bytes)}) unloaded.")
+            if event.remaining:
+                self.notice += (f" {event.remaining:,} still on local storage; the sync client may "
+                                "unload them later (Rescan to check).")
+            if job.failed:
+                self.notice += f" {job.failed:,} item{'s' if job.failed != 1 else ''} could not be marked."
+        self._update_status()
+        self.redraw()
+
+    def _free_summary(self) -> str:
+        """Status-line text for the "Free up space" commands still running."""
+        text = ""
+        for job in self.free_jobs:
+            if job.phase == "marking":
+                text += f" Freeing up space in {job.node.name}: {job.files:,} files marked so far..."
+            else:
+                text += (f" Freeing up space in {job.node.name}: {job.unloaded:,} of {job.watched:,} files "
+                         f"unloaded ({format_size(job.unloaded_bytes)}) so far.")
+        return text
+
+    def _freeing(self, node: Node) -> bool:
+        return any(job.node is node for job in self.free_jobs)
+
+    def _clear_pinned(self, node: Node) -> None:
+        """The item was marked "Free up space", so nothing in it (or above it) is "Always keep" now."""
+        anc: Optional[Node] = node.parent
+        while anc is not None:
+            anc.pinned = False
+            anc = anc.parent
+        stack = [node]
+        while stack:
+            n = stack.pop()
+            n.pinned = False
+            stack.extend(n.children)
+
+    def _in_tree(self, node: Node) -> bool:
+        """True if ``node`` still hangs in the shown tree or in a hidden folder
+        (and not in a subtree that a rescan replaced)."""
+        top = node
+        while top.parent is not None:
+            top = top.parent
+        return top is self.tree or top.path in self.hidden
+
+    def _node_at(self, path: str) -> Optional[Node]:
+        """The node at ``path`` in the shown tree or in a hidden folder, or None."""
+        roots = [self.tree] if self.tree is not None else []
+        roots.extend(node for node, _ in self.hidden.values())
+        for root in roots:
+            node = find_node(root, path)
+            if node is not None:
+                return node
+        return None
+
+    def _file_nodes(self, job: FreeUpJob, paths: list[str]) -> list[Node]:
+        """The file nodes for ``paths`` (under the job's item) that are in the tree.
+
+        Looked up in the job's path index, which is built from the tree on
+        first use and rebuilt once per batch when a path is missing from it,
+        or its node has been replaced by a rescan since. A path still missing
+        then is not in the tree (an empty file, or one the scan has not
+        reached, which it will then find online-only) and is left out.
+        """
+        found: list[Node] = []
+        missing: list[str] = []
+        for path in paths:
+            node = job.index.get(path) if job.index is not None else None
+            if node is not None and self._in_tree(node):
+                found.append(node)
+            else:
+                missing.append(path)
+        if missing:
+            job.index = {}
+            top = self._node_at(job.path)
+            if top is not None:
+                stack = [top]
+                while stack:
+                    n = stack.pop()
+                    if n.is_dir:
+                        stack.extend(n.children)
+                    else:
+                        job.index[n.path] = n
+            found.extend(n for path in missing if (n := job.index.get(path)) is not None)
+        return found
 
     # -- hidden folders ------------------------------------------------------
 
@@ -991,6 +1206,8 @@ class UnhogApp:
                 label = f"{node.name}  ({format_size(self._weight(node))})"
                 if self.scanning and node is self.tree:
                     label += "  \u2013 scanning..."
+                if self.free_jobs and self._freeing(node):
+                    label += "  \u2013 freeing up space..."
                 self._draw_label(label, x + px(4), y + (item.title_h - fs) / 2 - 1, w - px(8), TEXT, fs)
         else:
             fill = AGGREGATE_FILL + (255,) if node.aggregate else file_color(node, item.depth)
@@ -1196,8 +1413,11 @@ class UnhogApp:
         can_hide = item.node.is_dir and not item.node.aggregate and item.node is not self.tree
         dpg.configure_item(self.ctx_hide_sep, show=can_hide)
         dpg.configure_item(self.ctx_hide, show=can_hide)
+        can_free = self._can_free(item.node)
+        dpg.configure_item(self.ctx_free_sep, show=can_free)
+        dpg.configure_item(self.ctx_free, show=can_free)
         for sel in (self.ctx_back, self.ctx_zoom, self.ctx_open, self.ctx_folder, self.ctx_copy,
-                    self.ctx_props, self.ctx_rescan, self.ctx_hide):
+                    self.ctx_props, self.ctx_rescan, self.ctx_hide, self.ctx_free):
             dpg.set_value(sel, False)
         dpg.configure_item(self.context_menu, show=True, pos=dpg.get_mouse_pos(local=False))
 
@@ -1261,6 +1481,11 @@ class UnhogApp:
         if self.context_node is not None:
             self.hide_folder(self.context_node)
 
+    def _ctx_free(self) -> None:
+        self._close_menu()
+        if self.context_node is not None:
+            self.free_up(self.context_node)
+
 
 def open_in_explorer(path: str) -> None:
     """Show the folder ``path`` in the platform's file manager."""
@@ -1322,10 +1547,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if "--demo" in argv:
         # Made-up folder tree instead of a disk scan: for trying the UI and for screenshots.
-        from .demo import DEMO_ROOT, demo_disk_usage, demo_rescan, demo_scan
+        from .demo import DEMO_ROOT, demo_disk_usage, demo_free_up, demo_rescan, demo_scan
         argv = [a for a in argv if a != "--demo"]
         UnhogApp(argv[0] if argv else DEMO_ROOT, scanner=demo_scan, disk_usage=demo_disk_usage,
-                 rescanner=demo_rescan).run()
+                 rescanner=demo_rescan, freer=demo_free_up).run()
         return 0
     root = argv[0] if argv else None
     if root is not None and not os.path.isdir(root):
